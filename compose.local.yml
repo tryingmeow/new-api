@@ -16,6 +16,8 @@ services:
     volumes:
       - newapi-data:/data
       - newapi-logs:/app/logs
+    env_file:
+      - .env
     environment:
       TZ: Etc/UTC
       NODE_NAME: newapi-mother
