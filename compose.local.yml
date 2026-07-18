@@ -1,0 +1,43 @@
+name: newapi
+
+services:
+  new-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: local/new-api:source
+    restart: unless-stopped
+    init: true
+    command:
+      - --log-dir
+      - /app/logs
+    ports:
+      - "127.0.0.1:3001:3000"
+    volumes:
+      - newapi-data:/data
+      - newapi-logs:/app/logs
+    environment:
+      TZ: Etc/UTC
+      NODE_NAME: newapi-mother
+      ERROR_LOG_ENABLED: "true"
+      BATCH_UPDATE_ENABLED: "true"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O - http://127.0.0.1:3000/api/status | grep -q '"success":true'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cpus: 2.0
+    mem_limit: 1g
+    memswap_limit: 1g
+    pids_limit: 256
+
+volumes:
+  newapi-data:
+  newapi-logs:
