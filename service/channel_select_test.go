@@ -8,6 +8,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/setting"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -37,31 +38,43 @@ func seedAutoGroupRouting(t *testing.T, modelName string, groupOrder []string, c
 	prevRetryTimes := common.RetryTimes
 	prevAutoGroups := setting.AutoGroups2JsonString()
 	prevUsableGroups := setting.UserUsableGroups2JSONString()
+	prevGroupRatio := ratio_setting.GroupRatio2JSONString()
 	common.MemoryCacheEnabled = true
 	t.Cleanup(func() {
 		common.MemoryCacheEnabled = prevMemoryCache
 		common.RetryTimes = prevRetryTimes
 		require.NoError(t, setting.UpdateAutoGroupsByJsonString(prevAutoGroups))
 		require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(prevUsableGroups))
+		require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(prevGroupRatio))
 		require.NoError(t, model.DB.Exec("DELETE FROM channels").Error)
 		require.NoError(t, model.DB.Exec("DELETE FROM abilities").Error)
 		model.InitChannelCache()
 	})
 
+	// A group only counts as selectable once it is usable, listed in Auto, and
+	// carries a group ratio; the ratio requirement is what upstream added along
+	// with per-token Auto groups.
+	// 一个分组要可选，必须同时可用、在 Auto 列表里、并且配了分组倍率；倍率这一条是上游
+	// 随「按 token 配置 Auto 分组」一起加的。
 	usable := "{"
 	order := "["
+	ratios := "{"
 	for i, g := range groupOrder {
 		if i > 0 {
 			usable += ","
 			order += ","
+			ratios += ","
 		}
 		usable += `"` + g + `":"` + g + `"`
 		order += `"` + g + `"`
+		ratios += `"` + g + `":1`
 	}
 	usable += "}"
 	order += "]"
+	ratios += "}"
 	require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(usable))
 	require.NoError(t, setting.UpdateAutoGroupsByJsonString(order))
+	require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(ratios))
 
 	for _, c := range channels {
 		priority := c.priority
