@@ -1,0 +1,24 @@
+[Unit]
+Description=Compress, encrypt, and upload NewAPI chat audit records
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/newapi-audit.env
+ExecStart=/home/new-api/scripts/newapi-audit-archive
+UMask=0077
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+StateDirectory=newapi-audit
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/docker/volumes/newapi_newapi-data/_data /root/.config/rclone
+TimeoutStartSec=6h
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+: "${AUDIT_SOURCE_DIR:=/var/lib/docker/volumes/newapi_newapi-data/_data/chat-audit}"
+: "${AUDIT_WORK_DIR:=/var/lib/newapi-audit}"
+: "${AUDIT_REMOTE_ROOT:=e5onedrive:newapi-audit}"
+: "${AUDIT_LOCAL_DAYS:=3}"
+: "${RCLONE_CONFIG:=/root/.config/rclone/rclone.conf}"
+: "${AGE_RECIPIENT:?AGE_RECIPIENT is required}"
+
+if [[ ! "$AUDIT_LOCAL_DAYS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "AUDIT_LOCAL_DAYS must be a positive integer" >&2
+  exit 1
+fi
+
+for command_name in age flock jq rclone sha256sum zstd; do
+  command -v "$command_name" >/dev/null || {
+    echo "missing required command: $command_name" >&2
+    exit 1
+  }
+done
+
+mkdir -p "$AUDIT_SOURCE_DIR" "$AUDIT_WORK_DIR/archives" "$AUDIT_WORK_DIR/state"
+chmod 700 "$AUDIT_SOURCE_DIR" "$AUDIT_WORK_DIR" "$AUDIT_WORK_DIR/archives" "$AUDIT_WORK_DIR/state"
+exec 9>"$AUDIT_WORK_DIR/archive.lock"
+flock -n 9 || exit 0
+
+rclone_args=(--config "$RCLONE_CONFIG" --retries 5 --low-level-retries 10 --contimeout 30s --timeout 10m)
+
+remote_size() {
+  rclone "${rclone_args[@]}" lsjson --stat "$1" | jq -er '.Size'
+}
+
+archive_one() {
+  local source_file="$1"
+  local filename audit_date year month day archive_dir archive_file archive_name manifest_file marker_file
+  local source_size stored_source_size remote_ref local_size observed_remote_size encrypted_sha marker_tmp
+
+  filename="$(basename "$source_file")"
+  if [[ ! "$filename" =~ ^audit-([0-9]{4})-([0-9]{2})-([0-9]{2})\.jsonl$ ]]; then
+    echo "skip unexpected audit filename: $filename" >&2
+    return 0
+  fi
+  audit_date="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
+  year="${BASH_REMATCH[1]}"
+  month="${BASH_REMATCH[2]}"
+  day="${BASH_REMATCH[3]}"
+  archive_dir="$AUDIT_WORK_DIR/archives/$year/$month/$day"
+  archive_name="audit-$audit_date.jsonl.zst.age"
+  archive_file="$archive_dir/$archive_name"
+  manifest_file="$archive_file.sha256"
+  marker_file="$AUDIT_WORK_DIR/state/$audit_date.uploaded.json"
+  remote_ref="$AUDIT_REMOTE_ROOT/$year/$month/$day/$archive_name"
+  source_size="$(stat -c '%s' "$source_file")"
+
+  if [[ -f "$marker_file" ]]; then
+    stored_source_size="$(jq -r '.source_size // -1' "$marker_file" 2>/dev/null || true)"
+    if [[ "$stored_source_size" == "$source_size" ]]; then
+      local_size="$(jq -r '.encrypted_size // -1' "$marker_file" 2>/dev/null || true)"
+      observed_remote_size="$(remote_size "$remote_ref" 2>/dev/null || true)"
+      if [[ "$observed_remote_size" == "$local_size" ]]; then
+        return 0
+      fi
+    fi
+  fi
+
+  mkdir -p "$archive_dir"
+  chmod 700 "$archive_dir"
+  local temporary_file="$archive_file.tmp.$$"
+  trap 'rm -f -- "$temporary_file"' RETURN
+  zstd -T0 -10 --quiet --stdout -- "$source_file" | age -r "$AGE_RECIPIENT" -o "$temporary_file"
+  chmod 600 "$temporary_file"
+  mv -f -- "$temporary_file" "$archive_file"
+  trap - RETURN
+
+  encrypted_sha="$(sha256sum "$archive_file" | awk '{print $1}')"
+  printf '%s  %s\n' "$encrypted_sha" "$archive_name" >"$manifest_file"
+  chmod 600 "$manifest_file"
+  local_size="$(stat -c '%s' "$archive_file")"
+
+  rclone "${rclone_args[@]}" copyto "$archive_file" "$remote_ref"
+  observed_remote_size="$(remote_size "$remote_ref")"
+  if [[ "$observed_remote_size" != "$local_size" ]]; then
+    echo "remote size verification failed for $remote_ref: local=$local_size remote=$observed_remote_size" >&2
+    exit 1
+  fi
+  rclone "${rclone_args[@]}" copyto "$manifest_file" "$remote_ref.sha256"
+
+  marker_tmp="$marker_file.tmp.$$"
+  jq -n \
+    --arg date "$audit_date" \
+    --arg remote "$remote_ref" \
+    --arg sha256 "$encrypted_sha" \
+    --arg uploaded_at "$(date -u +%FT%TZ)" \
+    --argjson source_size "$source_size" \
+    --argjson encrypted_size "$local_size" \
+    '{date:$date,source_size:$source_size,encrypted_size:$encrypted_size,sha256:$sha256,remote:$remote,uploaded_at:$uploaded_at}' \
+    >"$marker_tmp"
+  chmod 600 "$marker_tmp"
+  mv -f -- "$marker_tmp" "$marker_file"
+  echo "uploaded and verified $audit_date to $remote_ref"
+}
+
+today="$(date -u +%F)"
+while IFS= read -r -d '' source_file; do
+  audit_date="${source_file##*/audit-}"
+  audit_date="${audit_date%.jsonl}"
+  if [[ "$audit_date" < "$today" ]]; then
+    archive_one "$source_file"
+  fi
+done < <(find "$AUDIT_SOURCE_DIR" -maxdepth 1 -type f -name 'audit-????-??-??.jsonl' -print0 | sort -z)
+
+cutoff="$(date -u -d "$AUDIT_LOCAL_DAYS days ago" +%F)"
+while IFS= read -r -d '' source_file; do
+  filename="$(basename "$source_file")"
+  audit_date="${filename#audit-}"
+  audit_date="${audit_date%.jsonl}"
+  [[ "$audit_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || continue
+  [[ "$audit_date" > "$cutoff" ]] && continue
+
+  marker_file="$AUDIT_WORK_DIR/state/$audit_date.uploaded.json"
+  [[ -f "$marker_file" ]] || {
+    echo "preserving $filename: no successful upload marker" >&2
+    continue
+  }
+  remote_ref="$(jq -er '.remote' "$marker_file")"
+  expected_size="$(jq -er '.encrypted_size' "$marker_file")"
+  observed_remote_size="$(remote_size "$remote_ref" 2>/dev/null || true)"
+  if [[ "$observed_remote_size" != "$expected_size" ]]; then
+    echo "preserving $filename: remote verification failed" >&2
+    continue
+  fi
+
+  archive_file="$AUDIT_WORK_DIR/archives/${audit_date:0:4}/${audit_date:5:2}/${audit_date:8:2}/audit-$audit_date.jsonl.zst.age"
+  rm -f -- "$source_file" "$archive_file" "$archive_file.sha256"
+  echo "removed verified local audit data for $audit_date"
+done < <(find "$AUDIT_SOURCE_DIR" -maxdepth 1 -type f -name 'audit-????-??-??.jsonl' -print0 | sort -z)
