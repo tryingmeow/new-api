@@ -60,66 +60,66 @@ func GetAllEnableAbilities() []Ability {
 	return abilities
 }
 
-func getPriority(group string, model string, retry int) (int, error) {
-
+// getChannelQuery builds the candidate query for the requested retry step and
+// also reports how many channels serve this group and model in total, which is
+// the ceiling on how many attempts this group can absorb before it is only
+// re-dialling something already tried.
+// 同时返回该分组下服务该模型的渠道总数，即该分组最多能承受多少次尝试——超过这个次数
+// 就只是在重复拨打已经试过的渠道。
+func getChannelQuery(group string, model string, retry int) (*gorm.DB, int, error) {
+	// One row per ability: the row count is the channel count, and the distinct
+	// values are the priority ladder.
+	// 每个 ability 一行：行数即渠道数，去重后的值即优先级阶梯。
 	var priorities []int
 	err := DB.Model(&Ability{}).
-		Select("DISTINCT(priority)").
+		Select("priority").
 		Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, model, true).
 		Order("priority DESC").              // 按优先级降序排序
 		Pluck("priority", &priorities).Error // Pluck用于将查询的结果直接扫描到一个切片中
-
 	if err != nil {
-		// 处理错误
-		return 0, err
+		return nil, 0, err
 	}
-
-	if len(priorities) == 0 {
-		// 如果没有查询到优先级，则返回错误
-		return 0, errors.New("数据库一致性被破坏")
-	}
-
-	// 确定要使用的优先级
-	var priorityToUse int
-	if retry >= len(priorities) {
-		// 如果重试次数大于优先级数，则使用最小的优先级
-		priorityToUse = priorities[len(priorities)-1]
-	} else {
-		priorityToUse = priorities[retry]
-	}
-	return priorityToUse, nil
-}
-
-func getChannelQuery(group string, model string, retry int) (*gorm.DB, error) {
-	maxPrioritySubQuery := DB.Model(&Ability{}).Select("MAX(priority)").Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, model, true)
-	channelQuery := DB.Where(commonGroupCol+" = ? and model = ? and enabled = ? and priority = (?)", group, model, true, maxPrioritySubQuery)
-	if retry != 0 {
-		priority, err := getPriority(group, model, retry)
-		if err != nil {
-			return nil, err
-		} else {
-			channelQuery = DB.Where(commonGroupCol+" = ? and model = ? and enabled = ? and priority = ?", group, model, true, priority)
+	channelCount := len(priorities)
+	distinct := priorities[:0:0]
+	for _, p := range priorities {
+		if len(distinct) == 0 || distinct[len(distinct)-1] != p {
+			distinct = append(distinct, p)
 		}
 	}
-
-	return channelQuery, nil
+	priorities = distinct
+	if len(priorities) == 0 {
+		// This group simply does not serve this model, which is an ordinary
+		// "no available channel" outcome rather than an error. Reporting an error
+		// here would surface a database-corruption message for the very common
+		// case of a client asking for a model the group does not carry.
+		// 该分组不提供此模型属于正常的“无可用渠道”，不是错误。在此返回错误会让最常见的
+		// “客户端请求了本分组没有的模型”变成一句“数据库一致性被破坏”。
+		return nil, 0, nil
+	}
+	if retry >= len(priorities) {
+		// 如果重试次数大于优先级数，则使用最小的优先级
+		retry = len(priorities) - 1
+	}
+	channelQuery := DB.Where(commonGroupCol+" = ? and model = ? and enabled = ? and priority = ?", group, model, true, priorities[retry])
+	return channelQuery, channelCount, nil
 }
 
-func GetChannel(group string, model string, retry int, requestPath string) (*Channel, error) {
+// GetChannel returns a weighted-random channel for the requested retry step and
+// the number of channels serving this group and model.
+func GetChannel(group string, model string, retry int, requestPath string) (*Channel, int, error) {
 	var abilities []Ability
 
-	var err error = nil
-	channelQuery, err := getChannelQuery(group, model, retry)
+	channelQuery, channelCount, err := getChannelQuery(group, model, retry)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	if common.UsingMainDatabase(common.DatabaseTypeSQLite) || common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
-		err = channelQuery.Order("weight DESC").Find(&abilities).Error
-	} else {
-		err = channelQuery.Order("weight DESC").Find(&abilities).Error
+	if channelQuery == nil {
+		// 该分组不提供此模型
+		return nil, 0, nil
 	}
+	err = channelQuery.Order("weight DESC").Find(&abilities).Error
 	if err != nil {
-		return nil, err
+		return nil, channelCount, err
 	}
 	abilities = filterAbilitiesByRequestPathAndModel(abilities, requestPath, model)
 	channel := Channel{}
@@ -140,10 +140,10 @@ func GetChannel(group string, model string, retry int, requestPath string) (*Cha
 			}
 		}
 	} else {
-		return nil, nil
+		return nil, channelCount, nil
 	}
 	err = DB.First(&channel, "id = ?", channel.Id).Error
-	return &channel, err
+	return &channel, channelCount, err
 }
 
 // filterAbilitiesByRequestPathAndModel restricts candidates by request path and
