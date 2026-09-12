@@ -1,5 +1,13 @@
 # Development log
 
+## 2026-09-12 — Re-applied the group retry bound on upstream's rewritten selection layer
+
+- Merging 107 upstream commits took `model/ability.go`, `model/channel_cache.go` and `service/channel_select.go` wholesale, which dropped the 2026-07-28 fix. The clamp it removed was back: `retry >= len(priorities)` fell to the lowest priority tier and still returned a channel, so with `RetryTimes=3` a group holding one channel burned four attempts on it before the next auto-group was reached.
+- The count now comes straight out of `GetChannel` and `GetRandomSatisfiedChannel`, which return `(*Channel, int, error)`. The 2026-07-28 entry's `getChannelQuery` mechanism no longer applies: upstream rewrote `GetChannel` to filter abilities in Go, and `getChannelQuery`/`getPriority` are dead code with no callers.
+- Both paths count the same filtered candidate set the selection draws from, so the count and the selection cannot disagree: the SQL path counts filtered ability rows (one row per channel within a group and model), the cache path counts the filtered candidate id list.
+- Auto-group selection keeps the same two bounds as before — a group is dialled no more times than it has channels for the model, and no more than `RetryTimes+1` times — and keeps the `givenUpChannel` fallback, so a model served by a single channel in a single group keeps its full retry budget instead of losing it.
+- `priorityRetry` lives on the request context rather than on `RetryParam`, because the distributor and the relay retry loop each build their own param.
+
 ## 2026-08-27 — Synced with upstream and shipped the local fork
 
 - Merged `origin/main` into the local fork after being 114 commits behind. No textual conflicts: the merge kept both the chat-audit hooks in `router/relay-router.go` and the channel-selection changes.

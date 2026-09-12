@@ -105,18 +105,31 @@ func getChannelQuery(group string, model string, retry int) (*gorm.DB, error) {
 	return channelQuery, nil
 }
 
+// GetChannel returns a weighted-random channel for the requested retry step and
+// the number of candidate channels this group and model actually has, after the
+// caller's filters are applied. See GetRandomSatisfiedChannel for why the count
+// is part of the contract rather than something the caller can infer.
+// 第二个返回值是应用过滤条件后、该分组下该模型真正拥有的候选渠道数量。为何必须由选路
+// 层报出这个数字、而不能由调用方推断，见 GetRandomSatisfiedChannel 的说明。
 func GetChannel(
 	group string,
 	model string,
 	retry int,
 	filters []dto.ChannelFilter,
-) (*Channel, error) {
+) (*Channel, int, error) {
 	var abilities []Ability
 	err := DB.Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, model, true).Order("priority DESC, weight DESC").Find(&abilities).Error
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	abilities = filterAbilitiesByConstraints(abilities, model, filters)
+	// The filtered row count is the candidate channel count: abilities are keyed by
+	// (group, model, channel_id), so within one group and model each row is a
+	// distinct channel. Counting the very set the selection below draws from is
+	// what keeps the count and the selection from ever disagreeing.
+	// 过滤后的行数即候选渠道数：ability 以 (分组, 模型, 渠道) 为主键，在同一分组同一模型下
+	// 一行即一个不重复的渠道。在下面选路所用的同一个集合上计数，计数口径与选路口径才不会分叉。
+	candidateCount := len(abilities)
 	if len(abilities) > 0 {
 		priorities := make([]int64, 0)
 		seen := make(map[int64]bool)
@@ -157,10 +170,10 @@ func GetChannel(
 			}
 		}
 	} else {
-		return nil, nil
+		return nil, candidateCount, nil
 	}
 	err = DB.First(&channel, "id = ?", channel.Id).Error
-	return &channel, err
+	return &channel, candidateCount, err
 }
 
 // filterAbilitiesByConstraints applies the same ChannelSatisfiesFilters

@@ -114,12 +114,22 @@ func SyncChannelCache(frequency int) {
 	}
 }
 
+// GetRandomSatisfiedChannel returns a weighted-random channel for the requested
+// retry step, plus the number of channels in the very candidate set the selection
+// was made from. Callers cannot derive exhaustion from a nil channel, because a
+// retry past the priority ladder is clamped back to the lowest priority and a
+// channel is still returned; the count is that missing signal, and it bounds how
+// many attempts this group can absorb before it is only re-dialling something
+// already tried.
+// 第二个返回值是本次选路所用候选集里的渠道数量。retry 超出优先级数量时会被 clamp 到
+// 最低优先级并照常返回渠道，调用方无法从 nil 判断“已用尽”，该计数即为缺失的那个信号：
+// 它给出该分组最多能承受多少次尝试。它与选路出自同一个已过滤候选集，口径必然一致。
 func GetRandomSatisfiedChannel(
 	group string,
 	model string,
 	retry int,
 	filters []dto.ChannelFilter,
-) (*Channel, error) {
+) (*Channel, int, error) {
 	// if memory cache is disabled, get channel directly from database
 	if !common.MemoryCacheEnabled {
 		return GetChannel(group, model, retry, filters)
@@ -138,14 +148,19 @@ func GetRandomSatisfiedChannel(
 	}
 
 	if len(channels) == 0 {
-		return nil, nil
+		return nil, 0, nil
 	}
+
+	// The filtered candidate list is the same set the weighted draw below runs on,
+	// so its length is the group's candidate count for this model.
+	// 过滤后的候选列表正是下面加权抽取所用的集合，其长度即该分组对此模型的候选渠道数。
+	candidateCount := len(channels)
 
 	if len(channels) == 1 {
 		if channel, ok := channelsIDM[channels[0]]; ok {
-			return channel, nil
+			return channel, candidateCount, nil
 		}
-		return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channels[0])
+		return nil, 0, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channels[0])
 	}
 
 	uniquePriorities := make(map[int]bool)
@@ -153,7 +168,7 @@ func GetRandomSatisfiedChannel(
 		if channel, ok := channelsIDM[channelId]; ok {
 			uniquePriorities[int(channel.GetPriority())] = true
 		} else {
-			return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channelId)
+			return nil, 0, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channelId)
 		}
 	}
 	var sortedUniquePriorities []int
@@ -177,12 +192,12 @@ func GetRandomSatisfiedChannel(
 				targetChannels = append(targetChannels, channel)
 			}
 		} else {
-			return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channelId)
+			return nil, 0, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channelId)
 		}
 	}
 
 	if len(targetChannels) == 0 {
-		return nil, errors.New(fmt.Sprintf("no channel found, group: %s, model: %s, priority: %d", group, model, targetPriority))
+		return nil, candidateCount, errors.New(fmt.Sprintf("no channel found, group: %s, model: %s, priority: %d", group, model, targetPriority))
 	}
 
 	// smoothing factor and adjustment
@@ -209,11 +224,11 @@ func GetRandomSatisfiedChannel(
 	for _, channel := range targetChannels {
 		randomWeight -= channel.GetWeight()*smoothingFactor + smoothingAdjustment
 		if randomWeight < 0 {
-			return channel, nil
+			return channel, candidateCount, nil
 		}
 	}
 	// return null if no channel is not found
-	return nil, errors.New("channel not found")
+	return nil, candidateCount, errors.New("channel not found")
 }
 
 func CacheGetChannel(id int) (*Channel, error) {
