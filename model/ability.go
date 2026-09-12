@@ -3,12 +3,12 @@ package model
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/constant"
-	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/dto"
 
 	"github.com/samber/lo"
 	"gorm.io/gorm"
@@ -60,68 +60,85 @@ func GetAllEnableAbilities() []Ability {
 	return abilities
 }
 
-// getChannelQuery builds the candidate query for the requested retry step and
-// also reports how many channels serve this group and model in total, which is
-// the ceiling on how many attempts this group can absorb before it is only
-// re-dialling something already tried.
-// 同时返回该分组下服务该模型的渠道总数，即该分组最多能承受多少次尝试——超过这个次数
-// 就只是在重复拨打已经试过的渠道。
-func getChannelQuery(group string, model string, retry int) (*gorm.DB, int, error) {
-	// One row per ability: the row count is the channel count, and the distinct
-	// values are the priority ladder.
-	// 每个 ability 一行：行数即渠道数，去重后的值即优先级阶梯。
+func getPriority(group string, model string, retry int) (int, error) {
+
 	var priorities []int
 	err := DB.Model(&Ability{}).
-		Select("priority").
+		Select("DISTINCT(priority)").
 		Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, model, true).
 		Order("priority DESC").              // 按优先级降序排序
 		Pluck("priority", &priorities).Error // Pluck用于将查询的结果直接扫描到一个切片中
+
 	if err != nil {
-		return nil, 0, err
+		// 处理错误
+		return 0, err
 	}
-	channelCount := len(priorities)
-	distinct := priorities[:0:0]
-	for _, p := range priorities {
-		if len(distinct) == 0 || distinct[len(distinct)-1] != p {
-			distinct = append(distinct, p)
-		}
-	}
-	priorities = distinct
+
 	if len(priorities) == 0 {
-		// This group simply does not serve this model, which is an ordinary
-		// "no available channel" outcome rather than an error. Reporting an error
-		// here would surface a database-corruption message for the very common
-		// case of a client asking for a model the group does not carry.
-		// 该分组不提供此模型属于正常的“无可用渠道”，不是错误。在此返回错误会让最常见的
-		// “客户端请求了本分组没有的模型”变成一句“数据库一致性被破坏”。
-		return nil, 0, nil
+		// 如果没有查询到优先级，则返回错误
+		return 0, errors.New("数据库一致性被破坏")
 	}
+
+	// 确定要使用的优先级
+	var priorityToUse int
 	if retry >= len(priorities) {
 		// 如果重试次数大于优先级数，则使用最小的优先级
-		retry = len(priorities) - 1
+		priorityToUse = priorities[len(priorities)-1]
+	} else {
+		priorityToUse = priorities[retry]
 	}
-	channelQuery := DB.Where(commonGroupCol+" = ? and model = ? and enabled = ? and priority = ?", group, model, true, priorities[retry])
-	return channelQuery, channelCount, nil
+	return priorityToUse, nil
 }
 
-// GetChannel returns a weighted-random channel for the requested retry step and
-// the number of channels serving this group and model.
-func GetChannel(group string, model string, retry int, requestPath string) (*Channel, int, error) {
-	var abilities []Ability
+func getChannelQuery(group string, model string, retry int) (*gorm.DB, error) {
+	maxPrioritySubQuery := DB.Model(&Ability{}).Select("MAX(priority)").Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, model, true)
+	channelQuery := DB.Where(commonGroupCol+" = ? and model = ? and enabled = ? and priority = (?)", group, model, true, maxPrioritySubQuery)
+	if retry != 0 {
+		priority, err := getPriority(group, model, retry)
+		if err != nil {
+			return nil, err
+		} else {
+			channelQuery = DB.Where(commonGroupCol+" = ? and model = ? and enabled = ? and priority = ?", group, model, true, priority)
+		}
+	}
 
-	channelQuery, channelCount, err := getChannelQuery(group, model, retry)
+	return channelQuery, nil
+}
+
+func GetChannel(
+	group string,
+	model string,
+	retry int,
+	filters []dto.ChannelFilter,
+) (*Channel, error) {
+	var abilities []Ability
+	err := DB.Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, model, true).Order("priority DESC, weight DESC").Find(&abilities).Error
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
-	if channelQuery == nil {
-		// 该分组不提供此模型
-		return nil, 0, nil
+	abilities = filterAbilitiesByConstraints(abilities, model, filters)
+	if len(abilities) > 0 {
+		priorities := make([]int64, 0)
+		seen := make(map[int64]bool)
+		for _, ability := range abilities {
+			priority := int64(0)
+			if ability.Priority != nil {
+				priority = *ability.Priority
+			}
+			if !seen[priority] {
+				seen[priority] = true
+				priorities = append(priorities, priority)
+			}
+		}
+		sort.Slice(priorities, func(i, j int) bool { return priorities[i] > priorities[j] })
+		if retry >= len(priorities) {
+			retry = len(priorities) - 1
+		}
+		targetPriority := priorities[retry]
+		abilities = lo.Filter(abilities, func(ability Ability, _ int) bool {
+			return ability.Priority == nil && targetPriority == 0 || ability.Priority != nil && *ability.Priority == targetPriority
+		})
 	}
-	err = channelQuery.Order("weight DESC").Find(&abilities).Error
-	if err != nil {
-		return nil, channelCount, err
-	}
-	abilities = filterAbilitiesByRequestPathAndModel(abilities, requestPath, model)
 	channel := Channel{}
 	if len(abilities) > 0 {
 		// Randomly choose one
@@ -140,20 +157,18 @@ func GetChannel(group string, model string, retry int, requestPath string) (*Cha
 			}
 		}
 	} else {
-		return nil, channelCount, nil
+		return nil, nil
 	}
 	err = DB.First(&channel, "id = ?", channel.Id).Error
-	return &channel, channelCount, err
+	return &channel, err
 }
 
-// filterAbilitiesByRequestPathAndModel restricts candidates by request path and
-// model for the DB (non-memory-cache) selection path. Only Advanced Custom
-// (type 58) channels are path-checked: kept only when one of their routes matches
-// requestPath and model; all other channel types always pass. When requestPath is
-// empty, filtering is skipped.
-func filterAbilitiesByRequestPathAndModel(abilities []Ability, requestPath string, model string) []Ability {
-	if requestPath == "" || len(abilities) == 0 {
-		return abilities
+// filterAbilitiesByConstraints applies the same ChannelSatisfiesFilters
+// predicate used by the memory-cache path. A failed channel lookup fails
+// closed when a task-plugin identity is required and fails open otherwise.
+func filterAbilitiesByConstraints(abilities []Ability, modelName string, filters []dto.ChannelFilter) []Ability {
+	if len(abilities) == 0 {
+		return nil
 	}
 
 	channelIds := make([]int, 0, len(abilities))
@@ -168,29 +183,34 @@ func filterAbilitiesByRequestPathAndModel(abilities []Ability, requestPath strin
 
 	var channels []*Channel
 	if err := DB.Where("id IN ?", channelIds).Find(&channels).Error; err != nil {
-		// On error, fall back to unfiltered candidates to avoid blocking selection
+		if identityFilterRequiresKey(filters) {
+			return nil
+		}
 		return abilities
 	}
 
-	advancedConfigs := make(map[int]*dto.AdvancedCustomConfig)
+	channelsByID := make(map[int]*Channel, len(channels))
 	for _, channel := range channels {
-		if channel.Type == constant.ChannelTypeAdvancedCustom {
-			advancedConfigs[channel.Id] = channel.GetOtherSettings().AdvancedCustom
-		}
+		channelsByID[channel.Id] = channel
 	}
 
 	filtered := make([]Ability, 0, len(abilities))
 	for _, ability := range abilities {
-		config, isAdvancedCustom := advancedConfigs[ability.ChannelId]
-		if !isAdvancedCustom {
-			filtered = append(filtered, ability)
-			continue
-		}
-		if config != nil && config.SupportsPathForModel(requestPath, model) {
+		channel := channelsByID[ability.ChannelId]
+		if ok, _ := ChannelSatisfiesFilters(channel, modelName, filters); ok {
 			filtered = append(filtered, ability)
 		}
 	}
 	return filtered
+}
+
+func identityFilterRequiresKey(filters []dto.ChannelFilter) bool {
+	for _, filter := range filters {
+		if filter.Kind == dto.FilterTaskPluginIdentity && filter.TaskPluginKey != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (channel *Channel) AddAbilities(tx *gorm.DB) error {
@@ -266,7 +286,7 @@ func (channel *Channel) UpdateAbilities(tx *gorm.DB) error {
 	}
 
 	// Then add new abilities
-	models_ := strings.Split(channel.Models, ",")
+	models_ := channel.GetModels()
 	groups_ := strings.Split(channel.Group, ",")
 	abilitySet := make(map[string]struct{})
 	abilities := make([]Ability, 0, len(models_))

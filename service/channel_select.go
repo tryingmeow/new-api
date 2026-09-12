@@ -5,10 +5,37 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/gin-gonic/gin"
 )
+
+func GetChannelConstraints(c *gin.Context) *dto.ChannelConstraints {
+	if c == nil {
+		return &dto.ChannelConstraints{}
+	}
+	if existing, ok := common.GetContextKeyType[*dto.ChannelConstraints](c, constant.ContextKeyChannelConstraints); ok && existing != nil {
+		return existing
+	}
+	constraints := &dto.ChannelConstraints{}
+	common.SetContextKey(c, constant.ContextKeyChannelConstraints, constraints)
+	return constraints
+}
+
+func AppendTaskPluginIdentityFilter(c *gin.Context, pluginKey string) {
+	if c == nil {
+		return
+	}
+	channelTypes, pluginKeys := pinnedTaskPluginIdentities(c, pluginKey)
+	GetChannelConstraints(c).AddFilter(dto.ChannelFilter{
+		Kind:                   dto.FilterTaskPluginIdentity,
+		TaskPluginKey:          pluginKey,
+		TaskPluginChannelTypes: channelTypes,
+		TaskPluginKeys:         pluginKeys,
+	})
+}
 
 type RetryParam struct {
 	Ctx          *gin.Context
@@ -45,16 +72,6 @@ func (p *RetryParam) ResetRetryNextTry() {
 	p.resetNextTry = true
 }
 
-// CancelResetRetryNextTry undoes a pending ResetRetryNextTry. Selection marks the
-// reset while walking towards another group; if the walk finds no group able to
-// take over, the walk is abandoned and the counter must resume as normal or the
-// retry loop would never reach its bound.
-// 选路在走向下一个分组时会预置重置；若最终没有分组能接手而放弃换组，必须撤销该预置，
-// 否则重试计数器不再前进，外层循环永远到不了上界。
-func (p *RetryParam) CancelResetRetryNextTry() {
-	p.resetNextTry = false
-}
-
 // CacheGetRandomSatisfiedChannel tries to get a random channel that satisfies the requirements.
 // 尝试获取一个满足要求的随机渠道。
 //
@@ -67,45 +84,35 @@ func (p *RetryParam) CancelResetRetryNextTry() {
 //   - Uses ContextKeyAutoGroupIndex to track current group index.
 //     使用 ContextKeyAutoGroupIndex 跟踪当前分组索引。
 //
-//   - Uses ContextKeyAutoGroupRetryIndex to track priorityRetry, the priority level
-//     within the current group. It lives on the request context rather than on
-//     RetryParam because the distributor and the relay retry loop each build their
-//     own RetryParam, so anything kept only on the param is lost between them.
-//     使用 ContextKeyAutoGroupRetryIndex 跟踪 priorityRetry，即当前分组内的优先级级别。
-//     它存放在请求 context 而非 RetryParam 上：distributor 与 relay 重试循环各自新建
-//     RetryParam，只存在 param 上的状态会在两者之间丢失。
+//   - Uses ContextKeyAutoGroupRetryIndex to track the global Retry count when current group started.
+//     使用 ContextKeyAutoGroupRetryIndex 跟踪当前分组开始时的全局重试次数。
 //
-//   - When GetRandomSatisfiedChannel returns nil (no channel for the model), moves to next group.
-//     当 GetRandomSatisfiedChannel 返回 nil（该模型无可用渠道）时，切换到下一个分组。
+//   - priorityRetry = Retry - startRetryIndex, represents the priority level within current group.
+//     priorityRetry = Retry - startRetryIndex，表示当前分组内的优先级级别。
 //
-//   - A group is never dialled more times than it has channels for the model, nor
-//     more than RetryTimes+1 times. The first bound is checked before selecting, so
-//     a group that is already used up costs no attempt; the second after, so the
-//     current attempt still uses the group it was chosen from. Counting channels
-//     rather than priority levels is what lets several channels on one level still
-//     take turns; whether a given level is revisited depends on how the budget and
-//     the ladder line up, so this is a bound, not a guarantee of sibling coverage.
-//     一个分组被拨打的次数不会超过它为该模型准备的渠道数，也不会超过 RetryTimes+1 次。
-//     前者在选路前判断，因此已用尽的分组不消耗尝试；后者在选路后判断，因此本次尝试仍用
-//     当前分组。按渠道数而非优先级层数计数，才使同一层上的多个渠道有机会轮到；某一层是否
-//     会被再次进入取决于预算与阶梯的相对长短，因此这是一个上限，而非同层必被覆盖的保证。
+//   - When GetRandomSatisfiedChannel returns nil (priorities exhausted), moves to next group.
+//     当 GetRandomSatisfiedChannel 返回 nil（优先级用完）时，切换到下一个分组。
 //
-// Example flow (GroupA has 1 priority, GroupB has 2, RetryTimes=2):
-// 示例流程（分组A 有1个优先级，分组B 有2个，RetryTimes=2）：
+// Example flow (2 groups, each with 2 priorities, RetryTimes=3):
+// 示例流程（2个分组，每个有2个优先级，RetryTimes=3）：
 //
-//	attempt 0 (distributor): GroupA, priority0 (priorityRetry=0)
-//	                         分组A, 优先级0
+//	Retry=0: GroupA, priority0 (startRetryIndex=0, priorityRetry=0)
+//	         分组A, 优先级0
 //
-//	attempt 1: priorityRetry=1 walks past GroupA's ladder → GroupB, priority0
-//	           priorityRetry=1 越过分组A的阶梯 → 分组B, 优先级0
+//	Retry=1: GroupA, priority1 (startRetryIndex=0, priorityRetry=1)
+//	         分组A, 优先级1
 //
-//	attempt 2: GroupB, priority1
-//	           分组B, 优先级1
+//	Retry=2: GroupA exhausted → GroupB, priority0 (startRetryIndex=2, priorityRetry=0)
+//	         分组A用完 → 分组B, 优先级0
+//
+//	Retry=3: GroupB, priority1 (startRetryIndex=2, priorityRetry=1)
+//	         分组B, 优先级1
 func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, error) {
 	var channel *model.Channel
 	var err error
 	selectGroup := param.TokenGroup
 	userGroup := common.GetContextKeyString(param.Ctx, constant.ContextKeyUserGroup)
+	filters := GetChannelConstraints(param.Ctx).Filters
 
 	if param.TokenGroup == "auto" {
 		autoGroups := GetRequestAutoGroups(param.Ctx, userGroup)
@@ -123,42 +130,25 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 				startGroupIndex = idx
 			}
 		}
-		// priorityRetry is the priority level within the current group, carried on
-		// the request context so it survives the RetryParam swap between the
-		// distributor and the relay retry loop.
-		// priorityRetry 是当前分组内的优先级级别，存放在请求 context 上，因此能跨越
-		// distributor 与 relay 重试循环之间的 RetryParam 更替。
-		priorityRetry := 0
-		if lastPriorityRetry, exists := common.GetContextKey(param.Ctx, constant.ContextKeyAutoGroupRetryIndex); exists {
-			if idx, ok := lastPriorityRetry.(int); ok {
-				priorityRetry = idx
-			}
-		}
-		// Capping a group's attempts only pays off when another group can take the
-		// model over. Remember the first group given up on, so that a walk which
-		// reaches the end without finding a successor can return to it instead of
-		// leaving the request with no channel at all — otherwise a model served by a
-		// single channel would lose retries entirely rather than fail over.
-		// 限制一个分组的尝试次数，只有在别的分组能接手该模型时才划算。记住第一个被放弃的
-		// 分组：若走到尽头都没有分组能接手，就退回它继续重试，而不是让请求无渠道可用。
-		// 否则只有单个渠道承载的模型会彻底失去重试，而不是转移到别处。
-		retryBeforeWalk := param.GetRetry()
-		var givenUpChannel *model.Channel
-		givenUpGroup := ""
-		givenUpIndex := 0
-		givenUpPriorityRetry := 0
 
 		for i := startGroupIndex; i < len(autoGroups); i++ {
 			autoGroup := autoGroups[i]
-			// If moved to a new group, restart from its highest priority
-			// 如果切换到新分组，从它的最高优先级重新开始
+			// Calculate priorityRetry for current group
+			// 计算当前分组的 priorityRetry
+			priorityRetry := param.GetRetry()
+			// If moved to a new group, reset priorityRetry and update startRetryIndex
+			// 如果切换到新分组，重置 priorityRetry 并更新 startRetryIndex
 			if i > startGroupIndex {
 				priorityRetry = 0
 			}
 			logger.LogDebug(param.Ctx, "Auto selecting group: %s, priorityRetry: %d", autoGroup, priorityRetry)
 
-			var channelCount int
-			channel, channelCount, _ = model.GetRandomSatisfiedChannel(autoGroup, param.ModelName, priorityRetry, param.RequestPath)
+			channel, _ = model.GetRandomSatisfiedChannel(
+				autoGroup,
+				param.ModelName,
+				priorityRetry,
+				filters,
+			)
 			if channel == nil {
 				// Current group has no available channel for this model, try next group
 				// 当前分组没有该模型的可用渠道，尝试下一个分组
@@ -171,27 +161,6 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 				param.SetRetry(0)
 				continue
 			}
-			if crossGroupRetry && priorityRetry > channelCount-1 {
-				if givenUpChannel == nil {
-					givenUpChannel = channel
-					givenUpGroup = autoGroup
-					givenUpIndex = i
-					givenUpPriorityRetry = priorityRetry
-				}
-				// 该分组已被拨打过与其渠道数一样多的次数，再试只会重复拨打已经失败的渠道
-				// （retry 超出优先级数量后会被 clamp 回最低优先级）。直接换组，不浪费这次尝试。
-				// This group has already been dialled as many times as it has channels
-				// for the model, so another attempt can only repeat one that already
-				// failed — retry past the ladder just clamps back to the lowest
-				// priority. Move on instead of spending an attempt here.
-				logger.LogDebug(param.Ctx, "Group %s exhausted for model %s (priorityRetry=%d, channelCount=%d), trying next group", autoGroup, param.ModelName, priorityRetry, channelCount)
-				common.SetContextKey(param.Ctx, constant.ContextKeyAutoGroupIndex, i+1)
-				common.SetContextKey(param.Ctx, constant.ContextKeyAutoGroupRetryIndex, 0)
-				param.SetRetry(0)
-				param.ResetRetryNextTry()
-				channel = nil
-				continue
-			}
 			common.SetContextKey(param.Ctx, constant.ContextKeyAutoGroup, autoGroup)
 			selectGroup = autoGroup
 			logger.LogDebug(param.Ctx, "Auto selected group: %s", autoGroup)
@@ -199,62 +168,85 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 			// Prepare state for next retry
 			// 为下一次重试准备状态
 			if crossGroupRetry && priorityRetry >= common.RetryTimes {
-				// Current group has exhausted its retry budget, prepare to switch to next group
+				// Current group has exhausted all retries, prepare to switch to next group
 				// This request still uses current group, but next retry will use next group
-				// 当前分组已用完重试预算，准备切换到下一个分组
+				// 当前分组已用完所有重试次数，准备切换到下一个分组
 				// 本次请求仍使用当前分组，但下次重试将使用下一个分组
-				logger.LogDebug(param.Ctx, "Current group %s retry budget exhausted (priorityRetry=%d >= RetryTimes=%d), preparing switch to next group for next retry", autoGroup, priorityRetry, common.RetryTimes)
+				logger.LogDebug(param.Ctx, "Current group %s retries exhausted (priorityRetry=%d >= RetryTimes=%d), preparing switch to next group for next retry", autoGroup, priorityRetry, common.RetryTimes)
 				common.SetContextKey(param.Ctx, constant.ContextKeyAutoGroupIndex, i+1)
-				common.SetContextKey(param.Ctx, constant.ContextKeyAutoGroupRetryIndex, 0)
 				// Reset retry counter so outer loop can continue for next group
 				// 重置重试计数器，以便外层循环可以为下一个分组继续
 				param.SetRetry(0)
 				param.ResetRetryNextTry()
 			} else {
-				// Stay in current group, descend one priority level on the next retry
-				// 保持在当前分组，下次重试降一级优先级
+				// Stay in current group, save current state
+				// 保持在当前分组，保存当前状态
 				common.SetContextKey(param.Ctx, constant.ContextKeyAutoGroupIndex, i)
-				common.SetContextKey(param.Ctx, constant.ContextKeyAutoGroupRetryIndex, priorityRetry+1)
 			}
 			break
 		}
-		if channel == nil && givenUpChannel != nil {
-			// Only resume when no other group carries the model at all. If one does,
-			// this request has already failed over to it and the cap has done its
-			// job; resuming would just re-dial a channel whose turn is over.
-			// 仅当确实没有任何其他分组承载该模型时才回退。若有，说明本次请求已经完成过
-			// 故障转移、上限已发挥作用，再回退只会重复拨打一个已经轮过的渠道。
-			servedElsewhere := false
-			for j, otherGroup := range autoGroups {
-				if j == givenUpIndex {
-					continue
-				}
-				if other, _, _ := model.GetRandomSatisfiedChannel(otherGroup, param.ModelName, 0, param.RequestPath); other != nil {
-					servedElsewhere = true
-					break
-				}
-			}
-			if servedElsewhere {
-				return nil, selectGroup, nil
-			}
-			// No group can take over this model, so the group given up on above is
-			// still the best available; resume retrying it under the RetryTimes bound.
-			// 没有任何分组能接手该模型，上面放弃的那个分组仍是最优选择，
-			// 回到它并在 RetryTimes 约束下继续重试。
-			logger.LogDebug(param.Ctx, "No group can take over model %s, resuming group %s", param.ModelName, givenUpGroup)
-			channel = givenUpChannel
-			selectGroup = givenUpGroup
-			common.SetContextKey(param.Ctx, constant.ContextKeyAutoGroup, givenUpGroup)
-			common.SetContextKey(param.Ctx, constant.ContextKeyAutoGroupIndex, givenUpIndex)
-			common.SetContextKey(param.Ctx, constant.ContextKeyAutoGroupRetryIndex, givenUpPriorityRetry+1)
-			param.SetRetry(retryBeforeWalk)
-			param.CancelResetRetryNextTry()
-		}
 	} else {
-		channel, _, err = model.GetRandomSatisfiedChannel(param.TokenGroup, param.ModelName, param.GetRetry(), param.RequestPath)
+		channel, err = model.GetRandomSatisfiedChannel(
+			param.TokenGroup,
+			param.ModelName,
+			param.GetRetry(),
+			filters,
+		)
 		if err != nil {
 			return nil, param.TokenGroup, err
 		}
 	}
 	return channel, selectGroup, nil
+}
+
+func pinnedTaskPluginIdentities(c *gin.Context, expected string) ([]int, []string) {
+	if c == nil || expected == "" {
+		return nil, nil
+	}
+	if value, exists := c.Get(jsplugin.ContextKeyPinnedEndpoint); exists {
+		pinned, ok := value.(jsplugin.PinnedEndpoint)
+		if ok && pinned.Generation != nil && len(pinned.Candidates) > 1 {
+			expectedFound := false
+			channelTypes := make([]int, 0, len(pinned.Candidates))
+			pluginKeys := make([]string, 0, len(pinned.Candidates))
+			seen := make(map[int]struct{}, len(pinned.Candidates))
+			for _, candidate := range pinned.Candidates {
+				if candidate.Plugin == nil {
+					continue
+				}
+				if candidate.Plugin.Meta.Key == expected {
+					expectedFound = true
+				}
+				pluginKeys = append(pluginKeys, candidate.Plugin.Meta.Key)
+				for _, channelType := range candidate.Plugin.Meta.ChannelTypes {
+					if channelType == 0 || channelType == constant.ChannelTypeTaskPlugin {
+						continue
+					}
+					if _, duplicate := seen[channelType]; duplicate {
+						continue
+					}
+					if plugin, indexed := pinned.Generation.GetByChannelType(channelType); indexed && plugin == candidate.Plugin {
+						seen[channelType] = struct{}{}
+						channelTypes = append(channelTypes, channelType)
+					}
+				}
+			}
+			if expectedFound {
+				return channelTypes, pluginKeys
+			}
+		}
+	}
+	value, exists := c.Get(jsplugin.ContextKeyPinnedPlugin)
+	pinned, ok := value.(jsplugin.PinnedPlugin)
+	if !exists || !ok || pinned.Generation == nil || pinned.Plugin == nil || pinned.Plugin.Meta.Key != expected {
+		return nil, nil
+	}
+	channelTypes := make([]int, 0, len(pinned.Plugin.Meta.ChannelTypes))
+	for _, channelType := range pinned.Plugin.Meta.ChannelTypes {
+		if channelType == 0 || channelType == constant.ChannelTypeTaskPlugin {
+			continue
+		}
+		channelTypes = append(channelTypes, channelType)
+	}
+	return channelTypes, []string{expected}
 }
