@@ -1,5 +1,15 @@
 # Development log
 
+## 2026-09-12 — Synced with upstream and shipped
+
+- Merged `origin/main` after being 107 commits behind (upstream head `385d2dfd1`, 2026-09-11). Conflicts were confined to the selection layer — `model/ability.go`, `model/channel_cache.go`, `service/channel_select.go` and `service/channel_select_test.go` — and were resolved by taking upstream wholesale; the local retry bound is re-applied as its own commit on top. The chat-audit middleware merged untouched and both router hook points survive upstream unchanged.
+- Upstream fixes this sync was worth doing for: `1751f43ee` SQLite WAL + busy timeout + `_txlock=immediate` (the pure-Go driver silently ignored `_busy_timeout=`, leaving this deployment on SQLite's 5s default), `b518d0033` bounded wait for upstream response headers (an unbounded park pinned three copies of the request body per stuck request), `9a8674425` no redundant schema migrations on restart, `6b659fd61` reasoning effort no longer implicitly remapped, `b148af80` response-injection fix in the unroutable-model error body.
+- `4fc9d1f1f` rebuilds the `options` primary key and dedupes last-wins. This instance had 15 rows and 15 distinct keys, so the migration was a detected no-op: no `options_legacy_*` table was created and the hand-written `ModelRatio`/`CompletionRatio`/`CacheRatio` blobs came through byte-identical.
+- `3a9f41ee8` disables `/v1/messages/count_tokens` upstream. Not a regression here: the endpoint was added upstream after this fork's base and never existed in this tree.
+- Backups taken before the migrations ran, all under `/home/new-api-backups/`: `one-api-20260912-pre-upstream-sync.db.gz` (online `.backup`, WAL-safe), the three pricing blobs, `channel_affinity_setting.rules`, and `pricing-20260912-pre-upstream-sync.json` from `/api/pricing`.
+- Rollback points: branch `pre-upstream-sync-20260912` and image `local/new-api:known-good-20260827`. The shipped image is also tagged `local/new-api:source-20260912`.
+- Verified after deploy: container healthy, no errors in the log, `journal_mode=wal`, `/api/pricing` identical at 61 models with zero ratio changes and nothing fallen to the `37.5` fallback, `channel_affinity_setting.rules` byte-identical with both CLI rules still at `skip_retry_on_failure=false`, and the 15 channels' enable/disable state preserved (channels 8 and 11 still disabled).
+
 ## 2026-09-12 — Re-applied the group retry bound on upstream's rewritten selection layer
 
 - Merging 107 upstream commits took `model/ability.go`, `model/channel_cache.go` and `service/channel_select.go` wholesale, which dropped the 2026-07-28 fix. The clamp it removed was back: `retry >= len(priorities)` fell to the lowest priority tier and still returned a channel, so with `RetryTimes=3` a group holding one channel burned four attempts on it before the next auto-group was reached.
