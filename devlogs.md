@@ -1,5 +1,13 @@
 # Development log
 
+## 2026-09-24 — Chat audit records `/v1/responses` again
+
+- From the 2026-09-12 deploy until this fix, chat audit recorded nothing. Upstream `eb48396d5` (sandboxed JS plugin system) moved `POST /v1/responses` out of the relay `httpRouter` group, which carries `ChatAudit()`, into an engine-level task-plugin chain in `router/task-plugin-protocol-router.go` that never had it. The hook lines in `relay-router.go` survived the merge unchanged; the route moved out from under them. Codex traffic is almost all `/v1/responses`, so the audit directory stayed empty and no error was logged, because the middleware never ran.
+- `ChatAudit()` now sits in the `openai_responses.create` chain after auth and rate limiting and before channel selection, the same position it held before the merge.
+- `router/chat_audit_router_test.go` builds the engine the way `SetRouter` does and posts to every `isChatAuditPath` path, plus `/v1/embeddings` as a negative control. It fails if upstream moves a chat route out of audit again. It lives in its own file so upstream merges do not conflict on it.
+- Records from 2026-09-12 to 2026-09-24 do not exist and cannot be recovered. The OneDrive archive covers 2026-08-29 to 2026-09-12.
+- Rollback image: `local/new-api:pre-chataudit-fix-20260924`. Verified after deploy: container healthy, one authenticated `/v1/responses` call produced a record with request, response, token name and status 200, and no bearer key in the file.
+
 ## 2026-09-12 — Synced with upstream and shipped
 
 - Merged `origin/main` after being 107 commits behind (upstream head `385d2dfd1`, 2026-09-11). Conflicts were confined to the selection layer — `model/ability.go`, `model/channel_cache.go`, `service/channel_select.go` and `service/channel_select_test.go` — and were resolved by taking upstream wholesale; the local retry bound is re-applied as its own commit on top. The chat-audit middleware merged untouched and both router hook points survive upstream unchanged.
