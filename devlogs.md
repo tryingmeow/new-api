@@ -1,5 +1,14 @@
 # Development log
 
+## 2026-10-20 — Merge upstream rc.45 and cover Responses WebSocket audit
+
+- Merged upstream `6cf0d90b5ff27f901697dddd61e0c28aba8efefc` with the local candidate-count return contract and auto-group retry state intact. Database routing now applies upstream normalized-model fallback before counting the filtered candidates, matching memory-cache routing.
+- The new Responses WebSocket path records sanitized application events per turn, with separate configured request/response byte caps. A final bounded record contains frame/byte totals and terminal classification after the client terminal write and request middleware complete. Events outside an admitted turn flush at session close; headers, query credentials and upstream connection state are excluded.
+- HTTP audit omits malformed/incomplete JSON rather than saving unredacted prefixes. SSE audit sanitizes each JSON data event, including credential-key variants, while retaining normal streaming content. Existing HTTP, Gemini and task-plugin hooks and encrypted archive scripts are preserved.
+- Verified full migration twice on fresh databases and twice on a synthetic previous-release fixture with legacy tokens/quotas, token fingerprint uniqueness, and filtered normalized routing with cache on/off across SQLite, MySQL 8.0.46 and PostgreSQL 16.15. All root-module Go package suites passed, along with focused retry/audit/websocket regressions, the root server build, independent `relaykit` build, and frontend `build:check`.
+- Audit security review references: OWASP [Authentication](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html), [Session Management](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html), and [Logging — data to exclude](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html#data-to-exclude). Focused tests cover credential exclusion, malformed/truncated payloads, and per-turn capture bounds; this is not an application-wide compliance assessment.
+- No deployment, production database/configuration change or remote push was performed.
+
 ## 2026-09-24 — Chat audit records `/v1/responses` again
 
 - From the 2026-09-12 deploy until this fix, chat audit recorded nothing. Upstream `eb48396d5` (sandboxed JS plugin system) moved `POST /v1/responses` out of the relay `httpRouter` group, which carries `ChatAudit()`, into an engine-level task-plugin chain in `router/task-plugin-protocol-router.go` that never had it. The hook lines in `relay-router.go` survived the merge unchanged; the route moved out from under them. Codex traffic is almost all `/v1/responses`, so the audit directory stayed empty and no error was logged, because the middleware never ran.

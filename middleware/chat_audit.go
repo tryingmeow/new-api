@@ -24,6 +24,11 @@ var chatAuditWriteMu sync.Mutex
 
 type chatAuditRecord struct {
 	Version           int         `json:"version"`
+	SessionId         string      `json:"session_id,omitempty"`
+	AuditSummary      bool        `json:"audit_summary,omitempty"`
+	Termination       string      `json:"termination,omitempty"`
+	RequestEvents     int         `json:"request_events,omitempty"`
+	ResponseEvents    int         `json:"response_events,omitempty"`
 	StartedAt         string      `json:"started_at"`
 	FinishedAt        string      `json:"finished_at"`
 	DurationMs        int64       `json:"duration_ms"`
@@ -190,11 +195,11 @@ func readAuditRequestBody(c *gin.Context, limit int64) ([]byte, int64, bool, err
 
 func sanitizeAuditRequest(body []byte, truncated bool) (interface{}, string) {
 	if truncated {
-		return string(body), ""
+		return "[audit body omitted: incomplete or invalid JSON]", ""
 	}
 	var value interface{}
 	if err := common.Unmarshal(body, &value); err != nil {
-		return string(body), ""
+		return "[audit body omitted: incomplete or invalid JSON]", ""
 	}
 	value = redactAuditSecrets(value)
 	modelName := ""
@@ -207,14 +212,32 @@ func sanitizeAuditRequest(body []byte, truncated bool) (interface{}, string) {
 }
 
 func sanitizeAuditResponse(body []byte, truncated bool) interface{} {
-	if truncated {
-		return string(body)
+	// SSE is parsed one complete event at a time; never retain raw malformed or
+	// partial data, because a secret field may cross the capture boundary.
+	if bytes.HasPrefix(bytes.TrimSpace(body), []byte("data:")) || bytes.HasPrefix(body, []byte("event:")) {
+		var events []any
+		for _, event := range strings.Split(strings.ReplaceAll(string(body), "\r\n", "\n"), "\n\n") {
+			var data []string
+			for line := range strings.SplitSeq(event, "\n") {
+				if value, ok := strings.CutPrefix(line, "data:"); ok {
+					data = append(data, strings.TrimPrefix(value, " "))
+				}
+			}
+			if len(data) == 0 {
+				continue
+			}
+			payload := strings.Join(data, "\n")
+			if payload == "[DONE]" {
+				events = append(events, payload)
+				continue
+			}
+			value, _ := sanitizeAuditRequest([]byte(payload), false)
+			events = append(events, value)
+		}
+		return events
 	}
-	var value interface{}
-	if err := common.Unmarshal(body, &value); err != nil {
-		return string(body)
-	}
-	return redactAuditSecrets(value)
+	value, _ := sanitizeAuditRequest(body, truncated)
+	return value
 }
 
 func redactAuditSecrets(value interface{}) interface{} {
@@ -236,9 +259,9 @@ func redactAuditSecrets(value interface{}) interface{} {
 }
 
 func isAuditSecretKey(key string) bool {
-	normalized := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(key), "-", "_"), " ", "_"))
+	normalized := strings.NewReplacer("-", "", "_", "", " ", "").Replace(strings.ToLower(strings.TrimSpace(key)))
 	switch normalized {
-	case "authorization", "api_key", "apikey", "access_token", "refresh_token", "id_token", "client_secret", "password", "secret":
+	case "authorization", "proxyauthorization", "apikey", "xapikey", "xgoogapikey", "accesstoken", "refreshtoken", "idtoken", "clientsecret", "password", "secret", "cookie", "setcookie", "sessiontoken":
 		return true
 	default:
 		return false
