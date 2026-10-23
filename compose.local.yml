@@ -26,6 +26,7 @@ services:
       CHAT_AUDIT_ENABLED: "true"
       CHAT_AUDIT_DIR: /data/chat-audit
       CHAT_AUDIT_MAX_BODY_MB: "8"
+      GOMEMLIMIT: 1536MiB
     healthcheck:
       test:
         - CMD-SHELL
@@ -39,8 +40,8 @@ services:
     cap_drop:
       - ALL
     cpus: 2.0
-    mem_limit: 1g
-    memswap_limit: 1g
+    mem_limit: 2g
+    memswap_limit: 2g
     pids_limit: 256
 
 volumes:
