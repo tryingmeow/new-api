@@ -89,6 +89,12 @@ func AppendRelayLogAdminInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo,
 	if common.GetContextKeyBool(ctx, constant.ContextKeyChannelIsMultiKey) {
 		other.SetAdmin("is_multi_key", true)
 		other.SetAdmin("multi_key_index", common.GetContextKeyInt(ctx, constant.ContextKeyChannelMultiKeyIndex))
+		if channel, err := model.CacheGetChannel(common.GetContextKeyInt(ctx, constant.ContextKeyChannelId)); err == nil && channel != nil {
+			fingerprint := model.KeyFingerprint(common.GetContextKeyString(ctx, constant.ContextKeyChannelKey))
+			if name := channel.ChannelInfo.KeyMeta[fingerprint].Name; name != "" {
+				other.SetAdmin("multi_key_name", name)
+			}
+		}
 	}
 	if common.GetContextKeyBool(ctx, constant.ContextKeyLocalCountTokens) {
 		other.SetAdmin("local_count_tokens", true)

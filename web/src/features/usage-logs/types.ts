@@ -205,6 +205,7 @@ export interface LogOtherData {
     request_plugins?: RequestPluginAdminStep[]
     is_multi_key?: boolean
     multi_key_index?: number
+    multi_key_name?: string
     use_channel?: number[]
     local_count_tokens?: boolean
     usage_billing_path?: UsageBillingPath | string

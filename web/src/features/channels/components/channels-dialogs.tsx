@@ -29,6 +29,7 @@ import { OllamaModelsDialog } from './dialogs/ollama-models-dialog'
 import { TagBatchEditDialog } from './dialogs/tag-batch-edit-dialog'
 import { UpstreamUpdateDialog } from './dialogs/upstream-update-dialog'
 import { ChannelMutateDrawer } from './drawers/channel-mutate-drawer'
+import { KeyUsageDialog } from './key-quota/key-usage-dialog'
 
 export function ChannelsDialogs() {
   const { open, setOpen, currentRow, upstream } = useChannels()
@@ -92,6 +93,15 @@ export function ChannelsDialogs() {
         open={open === 'multi-key-manage'}
         onOpenChange={(v) => !v && setOpen(null)}
       />
+
+      {open === 'key-usage' && currentRow && (
+        <KeyUsageDialog
+          open
+          onOpenChange={(v) => !v && setOpen(null)}
+          channelId={currentRow.id}
+          channelName={currentRow.name}
+        />
+      )}
 
       {/* Tag Batch Edit Dialog */}
       <TagBatchEditDialog

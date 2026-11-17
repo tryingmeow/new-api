@@ -60,6 +60,7 @@ export const channelsQueryKeys = {
   detail: (id: number) => [...channelsQueryKeys.details(), id] as const,
   pluginCredentials: (id: number) =>
     [...channelsQueryKeys.detail(id), 'plugin_credentials'] as const,
+  keys: (id: number) => [...channelsQueryKeys.detail(id), 'keys'] as const,
 }
 
 function getChannelTestResponseTime(

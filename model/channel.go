@@ -65,6 +65,8 @@ type Channel struct {
 	// BalanceDetail is the last balance query in channel responses; see
 	// GetBalanceDetail.
 	BalanceDetail *ChannelBalanceDetail `json:"balance_detail,omitempty" gorm:"-"`
+	// KeyQuotaSummary is the current-period key quota usage in channel lists.
+	KeyQuotaSummary *KeyQuotaSummary `json:"key_quota_summary,omitempty" gorm:"-"`
 }
 
 const ChannelStatusReasonAllKeysDisabled = "All keys are disabled"
@@ -77,6 +79,9 @@ type ChannelInfo struct {
 	MultiKeyDisabledTime   map[int]int64         `json:"multi_key_disabled_time,omitempty"`   // key禁用时间列表，key index -> time
 	MultiKeyPollingIndex   int                   `json:"multi_key_polling_index"`             // 多Key模式下轮询的key索引
 	MultiKeyMode           constant.MultiKeyMode `json:"multi_key_mode"`
+	// KeyMeta holds the name and quota override of each key by its
+	// fingerprint (see KeyFingerprint), so it survives key reordering.
+	KeyMeta map[string]KeyMeta `json:"key_meta,omitempty"`
 }
 
 type ChannelSortOptions struct {
@@ -834,7 +839,7 @@ func handlerMultiKeyUpdate(channel *Channel, usingKey string, status int, reason
 			channel.ChannelInfo.MultiKeyDisabledTime[keyIndex] = common.GetTimestamp()
 		}
 		if !hasEnabledMultiKey(keys, channel.ChannelInfo.MultiKeyStatusList) {
-			channel.Status = common.ChannelStatusAutoDisabled
+			channel.Status = multiKeyUnavailableStatus(channel.ChannelInfo.MultiKeyStatusList)
 			info := channel.GetOtherInfo()
 			info["status_reason"] = ChannelStatusReasonAllKeysDisabled
 			info["status_time"] = common.GetTimestamp()
@@ -1179,6 +1184,9 @@ func (channel *Channel) ValidateSettings() error {
 		}
 	}
 	if err := channelOtherSettings.ValidateToolLossPolicy(); err != nil {
+		return err
+	}
+	if err := channelOtherSettings.KeyQuota.Validate(); err != nil {
 		return err
 	}
 	if preset := common.GetAdvancedCustomPreset(channel.Type); preset != nil {

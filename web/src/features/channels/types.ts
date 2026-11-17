@@ -63,6 +63,20 @@ export type ChannelBalanceWindow = z.infer<typeof channelBalanceWindowSchema>
 export type ChannelBalanceResult = z.infer<typeof channelBalanceResultSchema>
 export type ChannelBalanceDetail = z.infer<typeof channelBalanceDetailSchema>
 
+export const keyQuotaSummarySchema = z.object({
+  enabled: z.boolean().default(false),
+  used_quota: z.number().default(0),
+  limit_quota: z.number().default(0),
+  percent: z.number().nullish(),
+  paused_keys: z.number().default(0),
+  total_keys: z.number().default(0),
+  next_reset_at: z.number().nullish(),
+  warn_percent: z.number().nullish(),
+  stop_percent: z.number().nullish(),
+})
+
+export type KeyQuotaSummary = z.infer<typeof keyQuotaSummarySchema>
+
 export const channelSchema = z.object({
   id: z.number(),
   type: z.number(),
@@ -101,6 +115,7 @@ export const channelSchema = z.object({
     multi_key_mode: 'random',
   }),
   settings: z.string().default('{}'), // other_settings JSON
+  key_quota_summary: keyQuotaSummarySchema.nullish(),
 })
 
 export type Channel = z.infer<typeof channelSchema>
@@ -151,6 +166,62 @@ export interface ChannelOtherSettings {
   advanced_custom?: AdvancedCustomConfig
   /** The values of the bound plugin's channel settings (type 61). */
   plugin_config?: Record<string, unknown>
+  /** Monthly quota cap; the default for every key of a multi-key channel. */
+  key_quota?: KeyQuotaConfig
+}
+
+// ============================================================================
+// Key Quota Types
+// ============================================================================
+
+export interface KeyQuotaConfig {
+  enabled: boolean
+  /** Quota units (quotaPerUnit equals 1 USD). */
+  monthly_quota: number
+  /** 1-31; a shorter month uses its last day. */
+  reset_day: number
+  /** 0-23, server local time. */
+  reset_hour: number
+  stop_percent: number
+  warn_percent: number
+}
+
+export type KeyQuotaMode = 'inherit' | 'custom' | 'none'
+
+export interface ChannelKeyRow {
+  index: number
+  fingerprint: string
+  preview: string
+  name: string
+  status: number // 1 enabled, 2 manual disabled, 3 auto disabled, 4 quota paused
+  disabled_reason?: string
+  quota_mode: KeyQuotaMode
+  effective_quota: KeyQuotaConfig | null
+  used_quota: number
+  request_count: number
+  period_start?: number
+  next_reset_at?: number | null
+  paused_at?: number | null
+  percent: number | null
+}
+
+export interface ChannelKeysData {
+  is_multi_key: boolean
+  quota: KeyQuotaConfig | null
+  keys: ChannelKeyRow[]
+}
+
+export interface ChannelKeysResponse {
+  success: boolean
+  message?: string
+  data?: ChannelKeysData
+}
+
+export interface SaveKeyMetaParams {
+  fingerprint: string
+  name: string
+  quota_mode: 'inherit' | 'custom'
+  quota?: KeyQuotaConfig | null
 }
 
 export interface AdvancedCustomConfig {
@@ -270,7 +341,7 @@ export interface CopyChannelResponse {
 
 export interface KeyStatus {
   index: number
-  status: number // 1: enabled, 2: manual disabled, 3: auto disabled
+  status: number // 1: enabled, 2: manual disabled, 3: auto disabled, 4: quota paused
   disabled_time?: number
   reason?: string
   key_preview?: string
@@ -299,6 +370,7 @@ export interface MultiKeyStatusResponse {
     enabled_count: number
     manual_disabled_count: number
     auto_disabled_count: number
+    quota_paused_count?: number
   }
 }
 

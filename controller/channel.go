@@ -64,6 +64,8 @@ func parseStatusFilter(statusParam string) int {
 		return common.ChannelStatusEnabled
 	case "disabled", "0":
 		return 0
+	case "quota_paused", "4":
+		return common.ChannelStatusQuotaPaused
 	default:
 		return -1
 	}
@@ -128,7 +130,8 @@ func disableMultiKeyChannelIfUnavailable(channel *model.Channel) bool {
 func restoreMultiKeyChannelIfAvailable(channel *model.Channel) {
 	// Manual key disables and request-driven key failures both record the
 	// all-keys reason; any later manual channel disable replaces it.
-	disabled := channel.Status == common.ChannelStatusManuallyDisabled || channel.Status == common.ChannelStatusAutoDisabled
+	disabled := channel.Status == common.ChannelStatusManuallyDisabled || channel.Status == common.ChannelStatusAutoDisabled ||
+		channel.Status == common.ChannelStatusQuotaPaused
 	if !disabled || !hasEnabledMultiKey(channel) {
 		return
 	}
@@ -172,6 +175,9 @@ func applyChannelStatusFilter(query *gorm.DB, statusFilter int) *gorm.DB {
 	}
 	if statusFilter == 0 {
 		return query.Where("status != ?", common.ChannelStatusEnabled)
+	}
+	if statusFilter == common.ChannelStatusQuotaPaused {
+		return query.Where("status = ?", common.ChannelStatusQuotaPaused)
 	}
 	return query
 }
@@ -287,6 +293,7 @@ func GetAllChannels(c *gin.Context) {
 		}
 	}
 
+	attachKeyQuotaSummaries(channelData)
 	for _, datum := range channelData {
 		clearChannelInfo(datum)
 	}
@@ -429,13 +436,16 @@ func SearchChannels(c *gin.Context) {
 		channelData = channels
 	}
 
-	if statusFilter == common.ChannelStatusEnabled || statusFilter == 0 {
+	if statusFilter == common.ChannelStatusEnabled || statusFilter == 0 || statusFilter == common.ChannelStatusQuotaPaused {
 		filtered := make([]*model.Channel, 0, len(channelData))
 		for _, ch := range channelData {
 			if statusFilter == common.ChannelStatusEnabled && ch.Status != common.ChannelStatusEnabled {
 				continue
 			}
 			if statusFilter == 0 && ch.Status == common.ChannelStatusEnabled {
+				continue
+			}
+			if statusFilter == common.ChannelStatusQuotaPaused && ch.Status != common.ChannelStatusQuotaPaused {
 				continue
 			}
 			filtered = append(filtered, ch)
@@ -482,6 +492,7 @@ func SearchChannels(c *gin.Context) {
 
 	pagedData := channelData[startIdx:endIdx]
 
+	attachKeyQuotaSummaries(pagedData)
 	for _, datum := range pagedData {
 		clearChannelInfo(datum)
 	}
@@ -1896,6 +1907,7 @@ type MultiKeyStatusResponse struct {
 	EnabledCount        int `json:"enabled_count"`
 	ManualDisabledCount int `json:"manual_disabled_count"`
 	AutoDisabledCount   int `json:"auto_disabled_count"`
+	QuotaPausedCount    int `json:"quota_paused_count"`
 }
 
 type KeyStatus struct {
@@ -1962,7 +1974,7 @@ func ManageMultiKeys(c *gin.Context) {
 		}
 
 		// Statistics for all keys (unchanged by filtering)
-		var enabledCount, manualDisabledCount, autoDisabledCount int
+		var enabledCount, manualDisabledCount, autoDisabledCount, quotaPausedCount int
 
 		// Build all key status data first
 		var allKeyStatusList []KeyStatus
@@ -1985,6 +1997,8 @@ func ManageMultiKeys(c *gin.Context) {
 				manualDisabledCount++
 			case 3:
 				autoDisabledCount++
+			case common.ChannelStatusQuotaPaused:
+				quotaPausedCount++
 			}
 
 			if status != 1 {
@@ -2057,6 +2071,7 @@ func ManageMultiKeys(c *gin.Context) {
 				EnabledCount:        enabledCount,        // Overall statistics
 				ManualDisabledCount: manualDisabledCount, // Overall statistics
 				AutoDisabledCount:   autoDisabledCount,   // Overall statistics
+				QuotaPausedCount:    quotaPausedCount,    // Overall statistics
 			},
 		})
 		return

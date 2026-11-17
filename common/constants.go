@@ -272,6 +272,9 @@ const (
 	ChannelStatusEnabled          = 1 // don't use 0, 0 is the default value!
 	ChannelStatusManuallyDisabled = 2 // also don't use 0
 	ChannelStatusAutoDisabled     = 3
+	// ChannelStatusQuotaPaused marks a key or channel paused by its monthly
+	// key quota; only the quota resumer or a manual resume enables it again.
+	ChannelStatusQuotaPaused = 4
 )
 
 const (

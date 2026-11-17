@@ -33,6 +33,7 @@ import {
   Trash2,
   Copy,
   FileText,
+  Gauge,
   Eraser,
   Eye,
   RefreshCw,
@@ -201,6 +202,7 @@ import {
   supportsNewAPIUpstream,
 } from '../../lib/channel-plugin-extensions'
 import { getChannelTypeConfig } from '../../lib/channel-type-config'
+import { DEFAULT_KEY_QUOTA, type KeyQuotaField } from '../../lib/key-quota'
 import {
   collectInvalidStatusCodeEntries,
   collectNewDisallowedStatusCodeRedirects,
@@ -227,6 +229,8 @@ import {
 } from '../dialogs/passthrough-warning-dialog'
 import { PluginLoginDialog } from '../dialogs/plugin-login-dialog'
 import { StatusCodeRiskDialog } from '../dialogs/status-code-risk-dialog'
+import { KeyQuotaFields } from '../key-quota/key-quota-fields'
+import { KeyUsageDialog } from '../key-quota/key-usage-dialog'
 import {
   ModelMappingBatchDialog,
   type ModelMappingBatchResult,
@@ -326,6 +330,7 @@ const SENSITIVE_FORM_FIELDS = [
   'header_override',
   'settings',
   'setting',
+  'key_quota',
   'advanced_custom',
   'is_enterprise_account',
   'vertex_key_type',
@@ -473,6 +478,7 @@ export function ChannelMutateDrawer({
   const initialModelMappingRef = useRef<string>('')
   const initialStatusCodeMappingRef = useRef<string>('')
   const [statusCodeRiskOpen, setStatusCodeRiskOpen] = useState(false)
+  const [keyUsageOpen, setKeyUsageOpen] = useState(false)
   const [statusCodeRiskDetailItems, setStatusCodeRiskDetailItems] = useState<
     string[]
   >([])
@@ -4948,6 +4954,59 @@ export function ChannelMutateDrawer({
     </div>
   )
 
+  const keyQuotaErrors = form.formState.errors.key_quota
+  const keyQuotaFieldErrors: Partial<Record<KeyQuotaField, string>> = {}
+  for (const field of Object.keys(DEFAULT_KEY_QUOTA) as KeyQuotaField[]) {
+    const message = keyQuotaErrors?.[field]?.message
+    if (message) keyQuotaFieldErrors[field] = message
+  }
+  const keyQuotaFields = (
+    <div
+      role='group'
+      aria-label={t('Quota cap')}
+      className={channelConfigurationBlockClassName(
+        configuration.blocks.keyQuota,
+        'space-y-4'
+      )}
+    >
+      <CardHeading
+        status={configuration.blocks.keyQuota}
+        title={t('Quota cap')}
+        icon={<Gauge className='size-4' />}
+      />
+      {(isMultiKeyChannel ||
+        (!isEditing && multiKeyMode === 'multi_to_single')) && (
+        <p className='text-muted-foreground text-xs'>
+          {t('These are the defaults; each key can be changed on its own')}
+        </p>
+      )}
+      <FormField
+        control={form.control}
+        name='key_quota'
+        render={({ field }) => (
+          <KeyQuotaFields
+            value={field.value ?? DEFAULT_KEY_QUOTA}
+            onChange={field.onChange}
+            errors={keyQuotaFieldErrors}
+            disabled={sensitiveLocked || isSubmitting}
+          />
+        )}
+      />
+      {isEditing && channelId && (
+        <div className='flex justify-end'>
+          <Button
+            type='button'
+            variant='outline'
+            size='sm'
+            onClick={() => setKeyUsageOpen(true)}
+          >
+            {isMultiKeyChannel ? t('Key usage') : t('Key usage and name')}
+          </Button>
+        </div>
+      )}
+    </div>
+  )
+
   let submitLabel = t('Create Channel')
   if (isEditing) {
     submitLabel = t('Update Channel')
@@ -5072,6 +5131,7 @@ export function ChannelMutateDrawer({
                 {tlsInsecureSkipVerifyFields}
               </fieldset>
             </div>
+            {keyQuotaFields}
             {upstreamModelDetectionFields}
             {notesFields}
           </>
@@ -5442,6 +5502,15 @@ export function ChannelMutateDrawer({
         }}
         handleConfirm={() => handlePassthroughWarningAction(true)}
       />
+
+      {keyUsageOpen && channelId && (
+        <KeyUsageDialog
+          open
+          onOpenChange={setKeyUsageOpen}
+          channelId={channelId}
+          channelName={currentRow?.name ?? ''}
+        />
+      )}
 
       {loginRequest && (
         <PluginLoginDialog

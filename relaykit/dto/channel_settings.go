@@ -147,6 +147,62 @@ type ChannelOtherSettings struct {
 	// PluginConfig is the config a type-61 channel gives its plugin, checked
 	// against the plugin's meta.channelConfig when the channel is saved.
 	PluginConfig json.RawMessage `json:"plugin_config,omitempty"`
+	// KeyQuota caps the monthly usage of each key of the channel. On a
+	// multi-key channel it is the default every key inherits.
+	KeyQuota *KeyQuotaConfig `json:"key_quota,omitempty"`
+}
+
+// KeyQuotaConfig is a monthly usage cap of an upstream key, counted in quota
+// units. A period starts on ResetDay (clamped to the month's last day) at
+// ResetHour, server local time.
+type KeyQuotaConfig struct {
+	Enabled      bool  `json:"enabled"`
+	MonthlyQuota int64 `json:"monthly_quota"`
+	ResetDay     int   `json:"reset_day"`
+	ResetHour    int   `json:"reset_hour"`
+	StopPercent  int   `json:"stop_percent"`
+	WarnPercent  int   `json:"warn_percent"`
+}
+
+const (
+	DefaultKeyQuotaStopPercent = 90
+	DefaultKeyQuotaWarnPercent = 80
+)
+
+// Normalized returns a copy with unset percentages and reset day defaulted.
+func (c KeyQuotaConfig) Normalized() KeyQuotaConfig {
+	if c.StopPercent == 0 {
+		c.StopPercent = DefaultKeyQuotaStopPercent
+	}
+	if c.WarnPercent == 0 {
+		c.WarnPercent = DefaultKeyQuotaWarnPercent
+	}
+	if c.ResetDay == 0 {
+		c.ResetDay = 1
+	}
+	return c
+}
+
+// Validate checks an enabled config after normalization; a disabled one is
+// accepted as is.
+func (c *KeyQuotaConfig) Validate() error {
+	if c == nil || !c.Enabled {
+		return nil
+	}
+	n := c.Normalized()
+	if n.MonthlyQuota <= 0 {
+		return fmt.Errorf("key_quota.monthly_quota must be greater than 0")
+	}
+	if n.ResetDay < 1 || n.ResetDay > 31 {
+		return fmt.Errorf("key_quota.reset_day must be between 1 and 31")
+	}
+	if n.ResetHour < 0 || n.ResetHour > 23 {
+		return fmt.Errorf("key_quota.reset_hour must be between 0 and 23")
+	}
+	if n.WarnPercent < 1 || n.WarnPercent >= n.StopPercent || n.StopPercent > 100 {
+		return fmt.Errorf("key_quota requires 1 <= warn_percent < stop_percent <= 100")
+	}
+	return nil
 }
 
 func (s *ChannelOtherSettings) IsOpenRouterEnterprise() bool {

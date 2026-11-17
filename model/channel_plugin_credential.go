@@ -69,6 +69,7 @@ func UpdateChannelLocked(channelID int, update func(channel *Channel) error) (*C
 		updates := map[string]any{}
 		if channel.Key != key {
 			updates["key"], keyChanged = channel.Key, true
+			channel.PruneKeyMeta()
 		}
 		if channel.Status != status {
 			updates["status"], statusChanged = channel.Status, true
@@ -267,6 +268,7 @@ func UpdateScheduledChannelLocked(ctx context.Context, channelID int, update fun
 		updates := map[string]any{}
 		if channel.Key != key {
 			updates["key"], keyChanged = channel.Key, true
+			channel.PruneKeyMeta()
 		}
 		if channel.Status != status {
 			updates["status"], statusChanged = channel.Status, true

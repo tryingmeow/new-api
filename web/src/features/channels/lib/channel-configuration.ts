@@ -104,6 +104,7 @@ const CONFIGURATION_BLOCKS = {
     ],
   },
   internalNotes: { section: 'other', fields: ['tag', 'remark'] },
+  keyQuota: { section: 'other', fields: ['key_quota'] },
 } as const satisfies Record<
   string,
   {
@@ -208,6 +209,7 @@ export function getChannelConfigurationState(
         values.upstream_model_update_ignored_models?.trim()
       ),
     internalNotes: Boolean(values.tag?.trim() || values.remark?.trim()),
+    keyQuota: values.key_quota?.enabled === true,
   }
   const blocks = {} as Record<
     ChannelConfigurationBlock,

@@ -139,6 +139,7 @@ export interface SystemStatus {
   }
   // Allow direct access to common properties
   version?: string
+  server_utc_offset?: number
   system_name?: string
   logo?: string
   github_oauth?: boolean

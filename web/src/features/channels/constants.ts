@@ -232,6 +232,7 @@ export const CHANNEL_STATUS = {
   ENABLED: 1,
   MANUAL_DISABLED: 2,
   AUTO_DISABLED: 3,
+  QUOTA_PAUSED: 4,
 } as const
 
 export const CHANNEL_STATUS_LABELS = {
@@ -239,12 +240,15 @@ export const CHANNEL_STATUS_LABELS = {
   [CHANNEL_STATUS.ENABLED]: 'Enabled',
   [CHANNEL_STATUS.MANUAL_DISABLED]: 'Disabled',
   [CHANNEL_STATUS.AUTO_DISABLED]: 'Auto Disabled',
+  [CHANNEL_STATUS.QUOTA_PAUSED]: 'Quota Paused',
 } as const
 
+/** `4` is sent as is: the list API filters quota-paused channels by status 4. */
 export const CHANNEL_STATUS_OPTIONS = [
   { value: 'all', label: 'All Status' },
   { value: 'enabled', label: 'Enabled' },
   { value: 'disabled', label: 'Disabled' },
+  { value: '4', label: 'Quota Paused' },
 ] as const
 
 export const CHANNEL_STATUS_CONFIG = {
@@ -264,6 +268,10 @@ export const CHANNEL_STATUS_CONFIG = {
     variant: 'warning' as const,
     label: 'Auto Disabled',
   },
+  [CHANNEL_STATUS.QUOTA_PAUSED]: {
+    variant: 'amber' as const,
+    label: 'Quota Paused',
+  },
 }
 
 // ============================================================================
@@ -274,12 +282,14 @@ export const MULTI_KEY_STATUS = {
   ENABLED: 1,
   MANUAL_DISABLED: 2,
   AUTO_DISABLED: 3,
+  QUOTA_PAUSED: 4,
 } as const
 
 export const MULTI_KEY_STATUS_LABELS = {
   [MULTI_KEY_STATUS.ENABLED]: 'Enabled',
   [MULTI_KEY_STATUS.MANUAL_DISABLED]: 'Manual Disabled',
   [MULTI_KEY_STATUS.AUTO_DISABLED]: 'Auto Disabled',
+  [MULTI_KEY_STATUS.QUOTA_PAUSED]: 'Quota Paused',
 } as const
 
 export const MULTI_KEY_STATUS_CONFIG = {
@@ -294,6 +304,10 @@ export const MULTI_KEY_STATUS_CONFIG = {
   [MULTI_KEY_STATUS.AUTO_DISABLED]: {
     variant: 'danger' as const,
     label: 'Auto Disabled',
+  },
+  [MULTI_KEY_STATUS.QUOTA_PAUSED]: {
+    variant: 'amber' as const,
+    label: 'Quota Paused',
   },
 }
 
@@ -324,6 +338,7 @@ export const MULTI_KEY_FILTER_OPTIONS = [
   { value: '1', label: 'Enabled' },
   { value: '2', label: 'Manual Disabled' },
   { value: '3', label: 'Auto Disabled' },
+  { value: '4', label: 'Quota Paused' },
 ] as const
 
 export const MULTI_KEY_CONFIRM_MESSAGES = {

@@ -33,9 +33,11 @@ import {
   Trash2,
   RefreshCw,
   Loader2,
+  ChartColumn,
 } from 'lucide-react'
 import { useContext, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
 
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Button } from '@/components/ui/button'
@@ -57,7 +59,12 @@ import {
   ADMIN_PERMISSION_RESOURCES,
   hasPermission,
 } from '@/lib/admin-permissions'
+import { handleServerError } from '@/lib/handle-server-error'
+import { createServerError, getServerMessage } from '@/lib/server-error-message'
 import { useAuthStore } from '@/stores/auth-store'
+
+import { resumeChannelPausedKeys } from '../api'
+import { CHANNEL_STATUS } from '../constants'
 
 import {
   useChannelBalanceQueryable,
@@ -91,8 +98,13 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
   const [isTesting, setIsTesting] = useState(false)
   const [isTogglingStatus, setIsTogglingStatus] = useState(false)
+  const [resumeConfirmOpen, setResumeConfirmOpen] = useState(false)
+  const [isResuming, setIsResuming] = useState(false)
 
   const isEnabled = isChannelEnabled(channel)
+  // A quota-paused channel resumes through the quota endpoint, behind the
+  // same warning as "Resume now", instead of a plain enable.
+  const isQuotaPaused = channel.status === CHANNEL_STATUS.QUOTA_PAUSED
   const isMultiKey = isMultiKeyChannel(channel)
   const canEditSensitive = hasPermission(
     currentUser,
@@ -147,10 +159,19 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
     setOpen('multi-key-manage')
   }
 
+  const handleKeyUsage = () => {
+    setCurrentRow(channel)
+    setOpen('key-usage')
+  }
+
   const handleToggleStatus = async (
     e?: React.MouseEvent<HTMLButtonElement>
   ) => {
     e?.stopPropagation()
+    if (isQuotaPaused) {
+      setResumeConfirmOpen(true)
+      return
+    }
     setIsTogglingStatus(true)
     try {
       await handleToggleChannelStatus(channel.id, channel.status, queryClient)
@@ -159,8 +180,26 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
     }
   }
 
+  const handleResumeConfirm = async () => {
+    setIsResuming(true)
+    try {
+      const res = await resumeChannelPausedKeys(channel.id)
+      if (!res.success) throw createServerError(res, t('Operation failed'))
+      toast.success(getServerMessage(res) || t('Operation successful'))
+      queryClient.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+      setResumeConfirmOpen(false)
+    } catch (error) {
+      handleServerError(error, t('Operation failed'))
+    } finally {
+      setIsResuming(false)
+    }
+  }
+
+  let statusLabel = isEnabled ? t('Disable') : t('Enable')
+  if (isQuotaPaused) statusLabel = t('Resume now')
+
   let statusIcon = <Power className='size-4' />
-  if (isTogglingStatus) {
+  if (isTogglingStatus || isResuming) {
     statusIcon = <Loader2 className='size-4 animate-spin' />
   } else if (isEnabled) {
     statusIcon = <PowerOff className='size-4' />
@@ -238,8 +277,8 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
               variant='ghost'
               size='icon-sm'
               onClick={handleToggleStatus}
-              disabled={isTogglingStatus}
-              aria-label={isEnabled ? t('Disable') : t('Enable')}
+              disabled={isTogglingStatus || isResuming}
+              aria-label={statusLabel}
               className={
                 isEnabled
                   ? 'text-destructive hover:text-destructive'
@@ -250,9 +289,7 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
         >
           {statusIcon}
         </TooltipTrigger>
-        <TooltipContent>
-          {isEnabled ? t('Disable') : t('Enable')}
-        </TooltipContent>
+        <TooltipContent>{statusLabel}</TooltipContent>
       </Tooltip>
 
       <DropdownMenu>
@@ -353,6 +390,16 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
             </DropdownMenuItem>
           )}
 
+          {/* Key usage and name (single-key channels; multi-key ones use Manage Keys) */}
+          {!isMultiKey && (
+            <DropdownMenuItem onClick={handleKeyUsage}>
+              {t('Key usage')}
+              <DropdownMenuShortcut>
+                <ChartColumn size={16} />
+              </DropdownMenuShortcut>
+            </DropdownMenuItem>
+          )}
+
           <DropdownMenuSeparator />
 
           {/* Delete */}
@@ -388,6 +435,27 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
           handleDeleteChannel(channel.id, queryClient)
           setDeleteConfirmOpen(false)
         }}
+      />
+
+      <ConfirmDialog
+        open={resumeConfirmOpen}
+        onOpenChange={setResumeConfirmOpen}
+        title={
+          isMultiKey ? t('Resume paused keys now?') : t('Resume this key now?')
+        }
+        desc={
+          isMultiKey
+            ? t(
+                'All quota-paused keys of this channel start working again before the refresh day. A key still over its stop line pauses again on its next request. Going on may make the upstream charge your card.'
+              )
+            : t(
+                'The key starts working again before the refresh day. If it is still over the stop line it pauses again on its next request. Going on may make the upstream charge your card.'
+              )
+        }
+        confirmText={t('Resume now')}
+        destructive
+        isLoading={isResuming}
+        handleConfirm={handleResumeConfirm}
       />
     </div>
   )
