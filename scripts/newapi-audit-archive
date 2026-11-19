@@ -5,7 +5,7 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 : "${AUDIT_SOURCE_DIR:=/var/lib/docker/volumes/newapi_newapi-data/_data/chat-audit}"
 : "${AUDIT_WORK_DIR:=/var/lib/newapi-audit}"
-: "${AUDIT_REMOTE_ROOT:=e5onedrive:newapi-audit}"
+: "${AUDIT_REMOTE_ROOT:=gdrive:newapi-audit}"
 : "${AUDIT_LOCAL_DAYS:=3}"
 : "${RCLONE_CONFIG:=/root/.config/rclone/rclone.conf}"
 : "${AGE_RECIPIENT:?AGE_RECIPIENT is required}"
@@ -15,7 +15,7 @@ if [[ ! "$AUDIT_LOCAL_DAYS" =~ ^[1-9][0-9]*$ ]]; then
   exit 1
 fi
 
-for command_name in age flock jq rclone sha256sum zstd; do
+for command_name in age flock gzip jq rclone sha256sum zstd; do
   command -v "$command_name" >/dev/null || {
     echo "missing required command: $command_name" >&2
     exit 1
@@ -27,7 +27,7 @@ chmod 700 "$AUDIT_SOURCE_DIR" "$AUDIT_WORK_DIR" "$AUDIT_WORK_DIR/archives" "$AUD
 exec 9>"$AUDIT_WORK_DIR/archive.lock"
 flock -n 9 || exit 0
 
-rclone_args=(--config "$RCLONE_CONFIG" --retries 5 --low-level-retries 10 --contimeout 30s --timeout 10m)
+rclone_args=(--config "$RCLONE_CONFIG" --bind 0.0.0.0 --disable-http2 --retries 5 --low-level-retries 10 --contimeout 30s --timeout 10m)
 
 remote_size() {
   rclone "${rclone_args[@]}" lsjson --stat "$1" | jq -er '.Size'
@@ -39,7 +39,7 @@ archive_one() {
   local source_size stored_source_size remote_ref local_size observed_remote_size encrypted_sha marker_tmp
 
   filename="$(basename "$source_file")"
-  if [[ ! "$filename" =~ ^audit-([0-9]{4})-([0-9]{2})-([0-9]{2})\.jsonl$ ]]; then
+  if [[ ! "$filename" =~ ^audit-([0-9]{4})-([0-9]{2})-([0-9]{2})\.jsonl(\.gz)?$ ]]; then
     echo "skip unexpected audit filename: $filename" >&2
     return 0
   fi
@@ -57,7 +57,7 @@ archive_one() {
 
   if [[ -f "$marker_file" ]]; then
     stored_source_size="$(jq -r '.source_size // -1' "$marker_file" 2>/dev/null || true)"
-    if [[ "$stored_source_size" == "$source_size" ]]; then
+    if [[ "$stored_source_size" == "$source_size" || "$filename" == *.jsonl.gz ]]; then
       local_size="$(jq -r '.encrypted_size // -1' "$marker_file" 2>/dev/null || true)"
       observed_remote_size="$(remote_size "$remote_ref" 2>/dev/null || true)"
       if [[ "$observed_remote_size" == "$local_size" ]]; then
@@ -70,7 +70,11 @@ archive_one() {
   chmod 700 "$archive_dir"
   local temporary_file="$archive_file.tmp.$$"
   trap 'rm -f -- "$temporary_file"' RETURN
-  zstd -T0 -10 --quiet --stdout -- "$source_file" | age -r "$AGE_RECIPIENT" -o "$temporary_file"
+  if [[ "$filename" == *.jsonl.gz ]]; then
+    gzip -cd -- "$source_file" | zstd -T0 -10 --quiet --stdout | age -r "$AGE_RECIPIENT" -o "$temporary_file"
+  else
+    zstd -T0 -10 --quiet --stdout -- "$source_file" | age -r "$AGE_RECIPIENT" -o "$temporary_file"
+  fi
   chmod 600 "$temporary_file"
   mv -f -- "$temporary_file" "$archive_file"
   trap - RETURN
@@ -105,19 +109,25 @@ archive_one() {
 
 today="$(date -u +%F)"
 while IFS= read -r -d '' source_file; do
-  audit_date="${source_file##*/audit-}"
-  audit_date="${audit_date%.jsonl}"
+  filename="${source_file##*/}"
+  if [[ "$filename" =~ ^audit-([0-9]{4})-([0-9]{2})-([0-9]{2})\.jsonl(\.gz)?$ ]]; then
+    audit_date="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
+  else
+    continue
+  fi
   if [[ "$audit_date" < "$today" ]]; then
     archive_one "$source_file"
   fi
-done < <(find "$AUDIT_SOURCE_DIR" -maxdepth 1 -type f -name 'audit-????-??-??.jsonl' -print0 | sort -z)
+done < <(find "$AUDIT_SOURCE_DIR" -maxdepth 1 -type f \( -name 'audit-????-??-??.jsonl' -o -name 'audit-????-??-??.jsonl.gz' \) -print0 | sort -z)
 
 cutoff="$(date -u -d "$AUDIT_LOCAL_DAYS days ago" +%F)"
 while IFS= read -r -d '' source_file; do
   filename="$(basename "$source_file")"
-  audit_date="${filename#audit-}"
-  audit_date="${audit_date%.jsonl}"
-  [[ "$audit_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || continue
+  if [[ "$filename" =~ ^audit-([0-9]{4})-([0-9]{2})-([0-9]{2})\.jsonl(\.gz)?$ ]]; then
+    audit_date="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
+  else
+    continue
+  fi
   [[ "$audit_date" > "$cutoff" ]] && continue
 
   marker_file="$AUDIT_WORK_DIR/state/$audit_date.uploaded.json"
@@ -136,4 +146,4 @@ while IFS= read -r -d '' source_file; do
   archive_file="$AUDIT_WORK_DIR/archives/${audit_date:0:4}/${audit_date:5:2}/${audit_date:8:2}/audit-$audit_date.jsonl.zst.age"
   rm -f -- "$source_file" "$archive_file" "$archive_file.sha256"
   echo "removed verified local audit data for $audit_date"
-done < <(find "$AUDIT_SOURCE_DIR" -maxdepth 1 -type f -name 'audit-????-??-??.jsonl' -print0 | sort -z)
+done < <(find "$AUDIT_SOURCE_DIR" -maxdepth 1 -type f \( -name 'audit-????-??-??.jsonl' -o -name 'audit-????-??-??.jsonl.gz' \) -print0 | sort -z)

@@ -1,5 +1,11 @@
 # Development log
 
+## 2026-11-09 — Repoint chat audit archive from OneDrive to Google Drive (`gdrive:`)
+
+- Repointed `/etc/newapi-audit.env`, `scripts/newapi-audit-archive`, and `docs/chat-audit-storage.md` from `e5onedrive:newapi-audit` to `gdrive:newapi-audit` (and added `--bind 0.0.0.0 --disable-http2` to `rclone_args`).
+- Verified all 161 objects (`7,268,356,293` bytes) under `newapi-audit/` copied to `gdrive:newapi-audit/` with `rclone check` (`0 differences found`) and updated `/var/lib/newapi-audit/state/*.uploaded.json` remote references to `gdrive:newapi-audit/...`.
+- Verified `newapi-audit-archive.service` via `make -C /home newapi-audit-archive-restart` (`status=0/SUCCESS`).
+
 ## 2026-10-30 — Merge upstream rc.47 and deploy
 
 - Merged upstream `v1.0.0-rc.47` (`e835b1bfc`) as `e937bcfd9`; the running build reports `v1.0.0-rc.47-16-ge937bcfd9`. One conflict, in `router/task-plugin-protocol-router.go`: upstream renamed `PinTaskPluginEndpoint` to `RouteTaskPluginEndpoint` on the line where `ChatAudit()` was added; resolved by taking the rename and keeping `ChatAudit()` after rate limiting in the `openai_responses.create` chain, so `/v1/responses` stays audited (`router/chat_audit_router_test.go` guards this).
