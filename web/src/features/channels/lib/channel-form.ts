@@ -41,6 +41,11 @@ import {
   validateAdvancedCustomConfig,
 } from './advanced-custom'
 import { readTaskExtendPluginKeys } from './channel-plugin-extensions'
+import {
+  DEFAULT_KEY_QUOTA,
+  normalizeKeyQuota,
+  validateKeyQuota,
+} from './key-quota'
 import { supportsResponsesWebSocket } from './responses-websocket'
 
 // ============================================================================
@@ -297,6 +302,17 @@ export const channelFormSchema = z
     upstream_model_update_check_enabled: z.boolean().optional(),
     upstream_model_update_auto_sync_enabled: z.boolean().optional(),
     upstream_model_update_ignored_models: z.string().optional(),
+    // Monthly quota cap (stored in settings JSON as key_quota)
+    key_quota: z
+      .object({
+        enabled: z.boolean(),
+        monthly_quota: z.number(),
+        reset_day: z.number().int(),
+        reset_hour: z.number().int(),
+        stop_percent: z.number().int(),
+        warn_percent: z.number().int(),
+      })
+      .optional(),
     // The bound plugin's channel settings (type 61, stored in settings JSON)
     plugin_config: z.record(z.string(), z.unknown()).optional(),
     // Their values as typed, null until edited (not sent to backend)
@@ -430,6 +446,16 @@ export const channelFormSchema = z
         ERROR_MESSAGES.INVALID_HTTP1_WITH_SHARDS
       )
     }
+
+    if (data.key_quota) {
+      for (const issue of validateKeyQuota(data.key_quota)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['key_quota', issue.field],
+          message: issue.message,
+        })
+      }
+    }
   })
 
 export type ChannelFormValues = z.infer<typeof channelFormSchema>
@@ -500,6 +526,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   upstream_model_update_auto_sync_enabled: false,
   upstream_model_update_ignored_models: '',
   advanced_custom: '',
+  key_quota: { ...DEFAULT_KEY_QUOTA },
   plugin_config: {},
   plugin_config_draft: null,
 }
@@ -586,6 +613,7 @@ export function transformChannelToFormDefaults(
   let upstreamModelUpdateIgnoredModels = ''
   let advancedCustom = ''
   let pluginConfig: Record<string, unknown> = {}
+  let keyQuota = { ...DEFAULT_KEY_QUOTA }
 
   if (channel.settings) {
     try {
@@ -621,6 +649,9 @@ export function transformChannelToFormDefaults(
       }
       if (isJsonObjectValue(parsed.plugin_config)) {
         pluginConfig = parsed.plugin_config
+      }
+      if (isJsonObjectValue(parsed.key_quota)) {
+        keyQuota = normalizeKeyQuota(parsed.key_quota)
       }
     } catch (error) {
       // eslint-disable-next-line no-console
@@ -677,6 +708,7 @@ export function transformChannelToFormDefaults(
     upstream_model_update_auto_sync_enabled: upstreamModelUpdateAutoSyncEnabled,
     upstream_model_update_ignored_models: upstreamModelUpdateIgnoredModels,
     advanced_custom: advancedCustom,
+    key_quota: keyQuota,
     plugin_config: pluginConfig,
     plugin_config_draft: null,
   }
@@ -885,6 +917,14 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
     }
   } else if ('advanced_custom' in settingsObj) {
     delete settingsObj.advanced_custom
+  }
+
+  // A cap that was never turned on is left out of the JSON.
+  if (
+    formData.key_quota &&
+    (formData.key_quota.enabled || 'key_quota' in settingsObj)
+  ) {
+    settingsObj.key_quota = normalizeKeyQuota(formData.key_quota)
   }
 
   // Only set values are kept; the plugin's defaults apply to the rest.

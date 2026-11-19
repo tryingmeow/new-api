@@ -47,7 +47,6 @@ import {
   getServerMessage,
   translateServerText,
 } from '@/lib/server-error-message'
-import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
 
 import {
@@ -63,6 +62,7 @@ import {
   CHANNEL_TYPE_TASK_PLUGIN,
   MULTI_KEY_FILTER_OPTIONS,
 } from '../../constants'
+import { useChannelKeys } from '../../hooks/use-channel-keys'
 import {
   channelsQueryKeys,
   formatTimestamp,
@@ -71,9 +71,19 @@ import {
   isDestructiveAction,
 } from '../../lib'
 import { formatChannelBalanceSummary } from '../../lib/channel-balance'
-import type { KeyStatus, MultiKeyConfirmAction } from '../../types'
+import type {
+  ChannelKeyRow,
+  KeyStatus,
+  MultiKeyConfirmAction,
+} from '../../types'
 import { ChannelBalanceDetails } from '../channel-balance-details'
 import { useChannels } from '../channels-provider'
+import {
+  KeyNameCell,
+  KeyRestoreCell,
+  KeyUsageCell,
+} from '../key-quota/key-quota-cells'
+import { KeyQuotaRowMenu } from '../key-quota/key-quota-row-menu'
 import { StatisticsCard } from './multi-key-statistics-card'
 import { MultiKeyTableRowActions } from './multi-key-table-row-actions'
 
@@ -102,6 +112,12 @@ export function MultiKeyManageDialog({
     ADMIN_PERMISSION_ACTIONS.SENSITIVE_WRITE
   )
 
+  // Names, usage and caps of the keys, matched to the rows by index.
+  const keysQuery = useChannelKeys(currentRow?.id ?? null, open)
+  const keyRows = new Map<number, ChannelKeyRow>(
+    (keysQuery.data?.keys ?? []).map((row) => [row.index, row])
+  )
+
   // Data state
   const [isLoading, setIsLoading] = useState(false)
   const [keys, setKeys] = useState<KeyStatus[]>([])
@@ -112,6 +128,7 @@ export function MultiKeyManageDialog({
   const [enabledCount, setEnabledCount] = useState(0)
   const [manualDisabledCount, setManualDisabledCount] = useState(0)
   const [autoDisabledCount, setAutoDisabledCount] = useState(0)
+  const [quotaPausedCount, setQuotaPausedCount] = useState(0)
 
   // UI state
   const [statusFilter, setStatusFilter] = useState<number | null>(null)
@@ -172,6 +189,7 @@ export function MultiKeyManageDialog({
         setEnabledCount(response.data.enabled_count || 0)
         setManualDisabledCount(response.data.manual_disabled_count || 0)
         setAutoDisabledCount(response.data.auto_disabled_count || 0)
+        setQuotaPausedCount(response.data.quota_paused_count || 0)
       } else {
         handleServerError(response, t('Failed to load key status'))
       }
@@ -233,6 +251,7 @@ export function MultiKeyManageDialog({
           queryKey: channelsQueryKeys.pluginCredentials(currentRow.id),
         })
 
+        keysQuery.refresh()
         // Reload data - reset to page 1 for bulk actions
         const isBulkAction = type.includes('all') || type === 'delete-disabled'
         if (isBulkAction) {
@@ -300,11 +319,8 @@ export function MultiKeyManageDialog({
         description={t(
           'Manage multi-key status and configuration for this channel'
         )}
-        // Key balances add a column, which needs the wider dialog.
-        contentClassName={cn(
-          'flex max-h-[min(90dvh,var(--dialog-available-height))] max-w-5xl flex-col',
-          keyBalances && 'sm:max-w-5xl'
-        )}
+        // The usage and resume columns need the wider dialog.
+        contentClassName='flex max-h-[min(90dvh,var(--dialog-available-height))] max-w-6xl flex-col sm:max-w-6xl'
         titleClassName='flex items-center gap-2'
         contentHeight='min(72vh, 720px)'
         bodyClassName='space-y-4'
@@ -314,7 +330,7 @@ export function MultiKeyManageDialog({
           className='flex min-h-0 flex-1 flex-col space-y-4 overflow-hidden'
         >
           {/* Statistics */}
-          <div className='grid shrink-0 grid-cols-3 gap-3'>
+          <div className='grid shrink-0 grid-cols-2 gap-3 sm:grid-cols-4'>
             <StatisticsCard
               label={t('Enabled')}
               count={enabledCount}
@@ -328,6 +344,11 @@ export function MultiKeyManageDialog({
             <StatisticsCard
               label={t('Auto Disabled')}
               count={autoDisabledCount}
+              total={total}
+            />
+            <StatisticsCard
+              label={t('Quota Paused')}
+              count={quotaPausedCount}
               total={total}
             />
           </div>
@@ -362,7 +383,10 @@ export function MultiKeyManageDialog({
               <Button
                 variant='outline'
                 size='sm'
-                onClick={() => loadKeyStatus()}
+                onClick={() => {
+                  loadKeyStatus()
+                  keysQuery.refresh()
+                }}
                 disabled={isLoading}
               >
                 <RefreshCw className='h-4 w-4' />
@@ -432,7 +456,7 @@ export function MultiKeyManageDialog({
             {!isLoading && !(keys.length === 0) && (
               <StaticDataTable
                 className='rounded-none border-0'
-                tableClassName='min-w-[800px]'
+                tableClassName='min-w-[1100px]'
                 data={keys}
                 getRowKey={(key) => key.index}
                 columns={[
@@ -442,6 +466,20 @@ export function MultiKeyManageDialog({
                     className: 'w-20',
                     cellClassName: 'font-mono text-sm',
                     cell: (key) => `#${key.index + 1}`,
+                  },
+                  {
+                    id: 'name',
+                    header: t('Key'),
+                    className: 'min-w-44',
+                    cell: (key) => {
+                      const row = keyRows.get(key.index)
+                      if (row) return <KeyNameCell row={row} />
+                      return (
+                        <span className='text-muted-foreground font-mono text-xs'>
+                          {key.key_preview || '-'}
+                        </span>
+                      )
+                    },
                   },
                   {
                     id: 'status',
@@ -481,6 +519,24 @@ export function MultiKeyManageDialog({
                       ]
                     : []),
                   {
+                    id: 'usage',
+                    header: t('Current month'),
+                    className: 'w-56',
+                    cell: (key) => {
+                      const row = keyRows.get(key.index)
+                      return row ? <KeyUsageCell row={row} /> : '-'
+                    },
+                  },
+                  {
+                    id: 'restore',
+                    header: t('Resumes at'),
+                    className: 'w-36',
+                    cell: (key) => {
+                      const row = keyRows.get(key.index)
+                      return row ? <KeyRestoreCell row={row} /> : '-'
+                    },
+                  },
+                  {
                     id: 'reason',
                     header: t('Disabled Reason'),
                     className: 'min-w-[200px]',
@@ -499,14 +555,31 @@ export function MultiKeyManageDialog({
                     id: 'actions',
                     header: t('Actions'),
                     className: 'text-right',
-                    cell: (key) => (
-                      <MultiKeyTableRowActions
-                        keyIndex={key.index}
-                        status={key.status}
-                        canDelete={canEditSensitive}
-                        onAction={openConfirm}
-                      />
-                    ),
+                    cell: (key) => {
+                      const row = keyRows.get(key.index)
+                      return (
+                        <div className='flex items-center justify-end gap-1'>
+                          <MultiKeyTableRowActions
+                            keyIndex={key.index}
+                            status={key.status}
+                            canDelete={canEditSensitive}
+                            onAction={openConfirm}
+                          />
+                          {row && (
+                            <KeyQuotaRowMenu
+                              channelId={currentRow.id}
+                              isMultiKey
+                              row={row}
+                              channelQuota={keysQuery.data?.quota ?? null}
+                              onChanged={() => {
+                                keysQuery.refresh()
+                                loadKeyStatus(currentPage, pageSize)
+                              }}
+                            />
+                          )}
+                        </div>
+                      )
+                    },
                   },
                 ]}
               />

@@ -21,7 +21,7 @@ import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import i18next from 'i18next'
 import { useEffect, useState } from 'react'
-import { afterEach, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 
 import { Dialog } from '@/components/dialog'
 import { Button } from '@/components/ui/button'
@@ -30,9 +30,20 @@ import { ROLE } from '@/lib/roles'
 import { useAuthStore } from '@/stores/auth-store'
 
 import { channelsQueryKeys } from '../../lib'
-import { channelSchema, type Channel, type KeyStatus } from '../../types'
+import {
+  channelSchema,
+  type Channel,
+  type ChannelKeyRow,
+  type KeyStatus,
+} from '../../types'
 import { ChannelsProvider, useChannels } from '../channels-provider'
 import { MultiKeyManageDialog } from '../dialogs/multi-key-manage-dialog'
+
+// Every test answers the keys request, so none reaches the network and
+// signs out the next test's user when it fails late.
+beforeEach(() => {
+  mockChannelKeys()
+})
 
 afterEach(async () => {
   vi.restoreAllMocks()
@@ -75,6 +86,18 @@ function keyStatusResponse(keys: KeyStatus[]) {
       },
     },
   }
+}
+
+/** Answers GET /api/channel/:id/keys, which the dialog loads beside the key status. */
+function mockChannelKeys(keys: ChannelKeyRow[] = [], quota = null) {
+  return vi.spyOn(api, 'get').mockImplementation(async (url: string) => {
+    if (url.endsWith('/keys')) {
+      return {
+        data: { success: true, data: { is_multi_key: true, quota, keys } },
+      }
+    }
+    throw new Error(`unexpected GET ${url}`)
+  })
 }
 
 function OpenDialog(props: { channel: Channel }) {
@@ -259,4 +282,68 @@ test('a plugin channel shows each key its own balance', async () => {
   expect(within(third).getAllByRole('cell')[balanceColumn]).toHaveTextContent(
     /^-$/
   )
+})
+
+test('a quota-paused key shows its name, own cap and a resume action that warns about charges', async () => {
+  vi.spyOn(api, 'post').mockResolvedValue({
+    data: {
+      success: true,
+      data: {
+        keys: [{ index: 0, status: 4 }],
+        total: 1,
+        page: 1,
+        page_size: 10,
+        total_pages: 1,
+        enabled_count: 0,
+        manual_disabled_count: 0,
+        auto_disabled_count: 0,
+      },
+    },
+  })
+  const quota = {
+    enabled: true,
+    monthly_quota: 5_000_000,
+    reset_day: 5,
+    reset_hour: 0,
+    stop_percent: 90,
+    warn_percent: 80,
+  }
+  mockChannelKeys([
+    {
+      index: 0,
+      fingerprint: 'abcd1234abcd1234',
+      preview: 'sk-ant-…f3c9',
+      name: 'Card 1234',
+      status: 4,
+      quota_mode: 'custom',
+      effective_quota: quota,
+      used_quota: 4_600_000,
+      request_count: 12,
+      next_reset_at: new Date(2026, 11, 5).getTime() / 1000,
+      percent: 92,
+    },
+  ])
+  const user = userEvent.setup()
+
+  render(
+    <QueryClientProvider client={new QueryClient()}>
+      <ChannelsProvider>
+        <OpenDialog channel={channelSchema.parse(multiKeyChannel)} />
+      </ChannelsProvider>
+    </QueryClientProvider>
+  )
+
+  const row = await screen.findByRole('row', { name: /Card 1234/ })
+  expect(within(row).getByText('Own quota')).toBeInTheDocument()
+  expect(within(row).getByText('sk-ant-…f3c9')).toBeInTheDocument()
+  expect(within(row).getByText('2026-12-05 00:00')).toBeInTheDocument()
+  expect(
+    within(row).queryByRole('button', { name: 'Enable' })
+  ).not.toBeInTheDocument()
+
+  await user.click(within(row).getByRole('button', { name: 'Open menu' }))
+  await user.click(await screen.findByRole('menuitem', { name: 'Resume now' }))
+
+  const confirm = await screen.findByRole('alertdialog')
+  expect(confirm).toHaveTextContent(/charge your card/)
 })

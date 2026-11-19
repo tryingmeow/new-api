@@ -89,6 +89,7 @@ var channelReadOnlyFields = map[string]struct{}{
 	"balance_updated_time": {},
 	"used_quota":           {},
 	"balance_detail":       {},
+	"key_quota_summary":    {},
 }
 
 func clearChannelReadOnlyFields(channel *PatchChannel, requestData map[string]any) {
@@ -113,6 +114,7 @@ func clearChannelReadOnlyFields(channel *PatchChannel, requestData map[string]an
 	if _, ok := requestData["balance_detail"]; ok {
 		channel.BalanceDetail = nil
 	}
+	channel.KeyQuotaSummary = nil
 }
 
 // channelNonSensitiveFields lists routing / server-managed channel

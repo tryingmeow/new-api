@@ -427,6 +427,11 @@ export function useCommonLogsColumns(
               other?.admin_info?.is_multi_key === true &&
               typeof multiKeyIndex === 'number' &&
               Number.isFinite(multiKeyIndex)
+            const multiKeyName = other?.admin_info?.multi_key_name?.trim()
+            const multiKeyLabel =
+              multiKeyName && sensitiveVisible
+                ? `${multiKeyName} (#${multiKeyIndex})`
+                : String(multiKeyIndex)
 
             return (
               <TooltipProvider>
@@ -527,7 +532,7 @@ export function useCommonLogsColumns(
                       )}
                       {showMultiKeyIndex && (
                         <p className='text-muted-foreground text-xs'>
-                          {t('Key')}: {multiKeyIndex}
+                          {t('Key')}: {multiKeyLabel}
                         </p>
                       )}
                       {affinity && (

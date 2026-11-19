@@ -36,7 +36,9 @@ export function MultiKeyTableRowActions({
   onAction,
 }: MultiKeyTableRowActionsProps) {
   const { t } = useTranslation()
-  const isEnabled = status === 1
+  // A quota-paused key resumes from the quota menu, which warns about
+  // charges, so it only offers Disable here.
+  const isEnabled = status === 1 || status === 4
 
   return (
     <div className='flex justify-end gap-2'>

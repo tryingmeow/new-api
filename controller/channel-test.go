@@ -1055,7 +1055,8 @@ func runChannelTestWorkers(
 					}
 
 					result := channelTestSummary{}
-					if channel != nil && channel.Status != common.ChannelStatusManuallyDisabled {
+					// A quota-paused key must not be probed upstream either.
+					if channel != nil && channel.Status != common.ChannelStatusManuallyDisabled && channel.Status != common.ChannelStatusQuotaPaused {
 						result = run(ctx, channel)
 					}
 
@@ -1163,7 +1164,7 @@ func runChannelTestTask(ctx context.Context, mode string, notify bool, report fu
 func selectChannelsForAutomaticTest(channels []*model.Channel, mode string) []*model.Channel {
 	selected := make([]*model.Channel, 0, len(channels))
 	for _, channel := range channels {
-		if channel.Status == common.ChannelStatusManuallyDisabled {
+		if channel.Status == common.ChannelStatusManuallyDisabled || channel.Status == common.ChannelStatusQuotaPaused {
 			continue
 		}
 		if mode == operation_setting.ChannelTestModeAutoBanOnly && !channel.GetAutoBan() {

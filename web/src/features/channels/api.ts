@@ -38,6 +38,8 @@ import type {
   BatchSetTagParams,
   Channel,
   ChannelBalanceResponse,
+  ChannelKeysData,
+  ChannelKeysResponse,
   ChannelOpsResponse,
   ChannelTestResponse,
   CopyChannelParams,
@@ -48,6 +50,7 @@ import type {
   GetChannelsResponse,
   MultiKeyManageParams,
   MultiKeyStatusResponse,
+  SaveKeyMetaParams,
   SearchChannelsParams,
   SearchChannelsResponse,
   TagOperationParams,
@@ -536,6 +539,77 @@ export async function getPluginCredentials(
     data: { items: PluginCredentialSummary[] | null }
   }>(`/api/channel/${channelId}/plugin_credentials`, channelActionConfig())
   return requireServerSuccess(res.data).data.items ?? []
+}
+
+// ============================================================================
+// Key Quota
+// ============================================================================
+
+/** Keys of a channel (single-key channels return one row) with usage this period. */
+export async function getChannelKeys(
+  channelId: number
+): Promise<ChannelKeysData> {
+  const res = await api.get<ChannelKeysResponse>(
+    `/api/channel/${channelId}/keys`,
+    { disableDuplicate: true }
+  )
+  const data = requireServerSuccess(res.data).data
+  return {
+    is_multi_key: data?.is_multi_key === true,
+    quota: data?.quota ?? null,
+    keys: data?.keys ?? [],
+  }
+}
+
+/** Save a key's name and quota mode. */
+export async function saveChannelKeyMeta(
+  channelId: number,
+  params: SaveKeyMetaParams
+): Promise<{ success: boolean; message?: string }> {
+  const res = await api.post(
+    `/api/channel/${channelId}/keys/meta`,
+    params,
+    channelActionConfig()
+  )
+  return res.data
+}
+
+/** Set this period's usage of a key to zero; a quota-paused key resumes. */
+export async function resetChannelKeyUsage(
+  channelId: number,
+  fingerprint: string
+): Promise<{ success: boolean; message?: string }> {
+  const res = await api.post(
+    `/api/channel/${channelId}/keys/reset_usage`,
+    { fingerprint },
+    channelActionConfig()
+  )
+  return res.data
+}
+
+/** Resume a quota-paused key now; usage stays as it is. */
+export async function resumeChannelKey(
+  channelId: number,
+  fingerprint: string
+): Promise<{ success: boolean; message?: string }> {
+  const res = await api.post(
+    `/api/channel/${channelId}/keys/resume`,
+    { fingerprint },
+    channelActionConfig()
+  )
+  return res.data
+}
+
+/** Resume every quota-paused key of a channel now; usage stays as it is. */
+export async function resumeChannelPausedKeys(
+  channelId: number
+): Promise<{ success: boolean; message?: string }> {
+  const res = await api.post(
+    `/api/channel/${channelId}/keys/resume_all`,
+    {},
+    channelActionConfig()
+  )
+  return res.data
 }
 
 // ============================================================================

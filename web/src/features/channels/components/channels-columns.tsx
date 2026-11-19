@@ -62,6 +62,7 @@ import { truncateText } from '@/lib/utils'
 
 import { getCodexUsage, updateChannelBalance } from '../api'
 import {
+  CHANNEL_STATUS,
   CHANNEL_STATUS_CONFIG,
   CHANNEL_TYPE_TASK_PLUGIN,
   CHANNEL_TYPE_VLLM,
@@ -106,6 +107,10 @@ import {
   CodexUsageDialog,
   type CodexUsageDialogData,
 } from './dialogs/codex-usage-dialog'
+import {
+  KeyQuotaSummaryBar,
+  QuotaResumeHint,
+} from './key-quota/key-quota-summary'
 import { NumericSpinnerInput } from './numeric-spinner-input'
 
 function parseIonetMeta(otherInfo: string | null | undefined): null | {
@@ -343,6 +348,20 @@ function TagWeightCell({ channel }: { channel: TagRow }) {
  */
 const MAX_INLINE_BALANCE_CHARS = 8
 const SENSITIVE_MASK = '••••'
+
+/** Used/remaining, with this period's quota cap bar below when one is set. */
+function BalanceWithQuotaCell(props: { channel: Channel }) {
+  const { sensitiveVisible } = useChannels()
+  if (isTagAggregateRow(props.channel)) {
+    return <BalanceCell channel={props.channel} />
+  }
+  return (
+    <div className='flex flex-col gap-1'>
+      <BalanceCell channel={props.channel} />
+      <KeyQuotaSummaryBar channel={props.channel} masked={!sensitiveVisible} />
+    </div>
+  )
+}
 
 /**
  * Balance cell component with click to update
@@ -1095,6 +1114,22 @@ export function useChannelsColumns(
             }
           }
 
+          if (status === CHANNEL_STATUS.QUOTA_PAUSED) {
+            return (
+              <div className='flex flex-col items-start gap-0.5'>
+                <StatusBadge
+                  label={label}
+                  variant={config.variant}
+                  size='sm'
+                  copyable={false}
+                />
+                <QuotaResumeHint
+                  nextResetAt={channel.key_quota_summary?.next_reset_at}
+                />
+              </div>
+            )
+          }
+
           return (
             <StatusBadge
               label={label}
@@ -1114,6 +1149,9 @@ export function useChannelsColumns(
           }
           if (value.includes('disabled')) {
             return status !== 1
+          }
+          if (value.includes(String(CHANNEL_STATUS.QUOTA_PAUSED))) {
+            return status === CHANNEL_STATUS.QUOTA_PAUSED
           }
           return false
         },
@@ -1227,7 +1265,7 @@ export function useChannelsColumns(
       {
         accessorKey: 'balance',
         header: t('Used / Remaining'),
-        cell: ({ row }) => <BalanceCell channel={row.original} />,
+        cell: ({ row }) => <BalanceWithQuotaCell channel={row.original} />,
         size: 180,
       },
 
